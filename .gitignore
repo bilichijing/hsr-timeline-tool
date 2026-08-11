@@ -1,0 +1,67 @@
+# ── Python ──────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+develop-eggs/
+downloads/
+parts/
+sdist/
+wheels/
+share/python-wheels/
+*.whl
+MANIFEST
+
+# ── 虚拟环境 ────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# ── 测试与覆盖率 ────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+.nox/
+
+# ── 类型检查/Lint 缓存 ──────────────────────────────
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+
+# ── 运行时生成的缓存（diskcache、头像下载等）─────────
+cache/
+
+# ── IDE / 编辑器 ────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── 日志 ────────────────────────────────────────────
+*.log
+logs/
+
+# ── 打包产物（PyInstaller）──────────────────────────
+*.spec
+build/
+dist/
+
+# ── 本地配置/敏感信息 ───────────────────────────────
+.env
+.env.local
+*.secret
+*.key
