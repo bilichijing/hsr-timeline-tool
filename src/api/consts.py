@@ -29,12 +29,12 @@ RARITY_MAP: dict[str, int] = {
 # 命途：Knight → 存护
 PATH_MAP: dict[str, str] = {
     "Knight": "存护",
-    "Rogue": "毁灭",
+    "Warrior": "毁灭",
     "Mage": "智识",
     "Warlock": "虚无",
-    "Shaman": "丰饶",
-    "Priest": "同谐",
-    "Warrior": "巡猎",
+    "Shaman": "同谐",
+    "Priest": "丰饶",
+    "Rogue": "巡猎",
     "Memory": "记忆",
     "Elation": "欢愉",
 }
@@ -64,14 +64,21 @@ class CacheTTL:
 
 # ── 图标 URL 生成 ──────────────────────────────────────────
 # 实测确认的 URL 模式：
-#   角色：  https://static.nanoka.cc/assets/hsr/avatardrawcard/{id}.webp
+#   角色头像（圆形小图）：https://static.nanoka.cc/assets/hsr/avatarroundicon/{id}.webp  ~10KB
+#   角色头像（方形）：    https://static.nanoka.cc/assets/hsr/avataricon/avatar/{id}.webp ~20KB
+#   角色立绘（大图）：    https://static.nanoka.cc/assets/hsr/avatardrawcard/{id}.webp    ~1MB
 #   光锥：  https://static.nanoka.cc/assets/hsr/itemfigures/{id}.webp
 #   遗器：  https://static.nanoka.cc/assets/hsr/itemfigures/{数字ID}.webp
 #   怪物：  https://static.nanoka.cc/assets/hsr/monsterfigure/{文件名}.webp
 
 
 def character_icon_url(char_id: str | int) -> str:
-    """角色头像图标 URL（用数字 ID，非 icon 字段的简短名）。"""
+    """角色头像图标 URL（圆形小头像，用数字 ID）。"""
+    return f"{ASSET_BASE}/avatarroundicon/{char_id}.webp"
+
+
+def character_fullart_url(char_id: str | int) -> str:
+    """角色完整立绘 URL（大图，用数字 ID）。"""
     return f"{ASSET_BASE}/avatardrawcard/{char_id}.webp"
 
 

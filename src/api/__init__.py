@@ -16,6 +16,7 @@ from src.api.consts import (
     NANOKA_BASE,
     PATH_MAP,
     RARITY_MAP,
+    character_fullart_url,
     character_icon_url,
     lightcone_icon_url,
     monster_icon_url,
@@ -48,6 +49,7 @@ __all__ = [
     "ELEMENT_MAP",
     # 图标 URL
     "character_icon_url",
+    "character_fullart_url",
     "lightcone_icon_url",
     "relicset_icon_url",
     "monster_icon_url",

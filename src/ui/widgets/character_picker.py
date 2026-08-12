@@ -283,7 +283,7 @@ class CharacterPickerDialog(QDialog):
             self.status_label.setText(f"共 {len(chars)} 个角色（头像已全部缓存）")
         else:
             self.status_label.setText(
-                f"共 {len(chars)} 个角色，正在下载头像（{cached}/{len(chars)}）..."
+                f"共 {len(chars)} 个角色"
             )
 
     def _on_icon_loaded(self, char_id: str, path: str) -> None:

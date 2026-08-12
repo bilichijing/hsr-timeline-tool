@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -100,6 +101,7 @@ class CharacterUnit:
     # 好活当赏以 buff 形式存在，由 buff_mgr 管理
     is_elation: bool = False  # 是否欢愉命途
     elation_skill_index: int = 0  # 欢愉技参演编号
+    char_id: str = ""        # nanoka 角色 ID（用于加载头像，空表示无头像）
 
     def __post_init__(self) -> None:
         self.buff_mgr.unit_id = self.unit_id
@@ -273,9 +275,12 @@ class BattleSimulator:
             self._spawn_aha()
 
     def _spawn_aha(self) -> None:
-        """阿哈加入行动条。"""
+        """阿哈加入行动条（一场战斗仅召唤最先的一只）。"""
         elation_chars = [c for c in self.characters if c.is_elation]
         if not elation_chars:
+            return
+        # 若阿哈已在行动条上，则不重复召唤
+        if self.aha_entry is not None:
             return
         # 按速度降序排序
         sorted_chars = sorted(elation_chars, key=lambda c: c.final_stats().spd, reverse=True)
@@ -376,6 +381,114 @@ class BattleSimulator:
             final_sp=self.sp.current,
         )
 
+    # ── 交互模式：步进 / 终结技插队 / 快照回溯 ────────
+
+    def step(self, action: PlayerAction | None = None) -> ActionLog | None:
+        """执行一步模拟（交互模式用）。
+
+        - 当前行动者是怪物/阿哈：自动行动，忽略 action 参数
+        - 当前行动者是角色：使用 action 执行操作（为 None 时用默认逻辑）
+
+        Returns: 本次行动的 ActionLog；战斗已结束则返回 None
+        """
+        if self.total_av >= self.max_av or self.current_turn >= self.max_turns:
+            return None
+        if not self.action_queue.entries:
+            return None
+
+        actor = self.action_queue.next_actor()
+        if actor.current_av > 10000:
+            return None
+
+        self.current_turn += 1
+        self.total_av += actor.current_av
+
+        # 阿哈时刻
+        if actor.unit_id == "__aha__":
+            self._trigger_aha_moment()
+            return self.logs[-1] if self.logs else None
+
+        # 怪物行动
+        if actor.is_monster:
+            self._monster_act(actor)
+            return self.logs[-1] if self.logs else None
+
+        # 角色行动
+        char = self._get_character(actor.unit_id)
+        if char is None:
+            self.action_queue.advance()
+            return None
+
+        if action is None:
+            action = self._default_action(char)
+
+        self._character_act(char, action, actor)
+        return self.logs[-1] if self.logs else None
+
+    def execute_ultra(self, char_index: int) -> ActionLog | None:
+        """释放终结技（插队，不推进行动队列，不消耗回合）。
+
+        Args:
+            char_index: 角色在队伍中的位置（0-3）
+
+        Returns: 终结技的 ActionLog；能量不足或角色不存在则返回 None
+        """
+        if char_index < 0 or char_index >= len(self.characters):
+            return None
+        char = self.characters[char_index]
+
+        # 找到终结技
+        skill: Skill | None = None
+        for s in char.skills.values():
+            if s.skill_type == SkillType.ULTRA:
+                skill = s
+                break
+        if skill is None:
+            return None
+
+        # 检查能量
+        energy_cost = skill.energy_cost or self._get_energy_cost(char, SkillType.ULTRA)
+        if char.energy < energy_cost:
+            return None
+
+        target_id = self.enemies[0].unit_id if self.enemies else ""
+        action = PlayerAction(
+            unit_id=char.unit_id,
+            skill_type=SkillType.ULTRA,
+            target_id=target_id,
+            notes="终结技（插队）",
+        )
+
+        return self._resolve_skill(char, skill, action, entry=None, is_turn=False)
+
+    def snapshot(self) -> dict:
+        """保存当前完整状态快照（用于交互模式回溯）。"""
+        return {
+            "characters": copy.deepcopy(self.characters),
+            "enemies": copy.deepcopy(self.enemies),
+            "action_queue": copy.deepcopy(self.action_queue),
+            "sp": copy.deepcopy(self.sp),
+            "logs": copy.deepcopy(self.logs),
+            "total_damage": self.total_damage,
+            "total_av": self.total_av,
+            "current_turn": self.current_turn,
+            "aha_count": self.aha_count,
+            "aha_entry": copy.deepcopy(self.aha_entry),
+        }
+
+    def restore(self, snap: dict) -> None:
+        """从快照恢复状态。"""
+        self.characters = copy.deepcopy(snap["characters"])
+        self.enemies = copy.deepcopy(snap["enemies"])
+        self.action_queue = copy.deepcopy(snap["action_queue"])
+        self.sp = copy.deepcopy(snap["sp"])
+        self.logs = copy.deepcopy(snap["logs"])
+        self.total_damage = snap["total_damage"]
+        self.total_av = snap["total_av"]
+        self.current_turn = snap["current_turn"]
+        self.aha_count = snap["aha_count"]
+        self.aha_entry = copy.deepcopy(snap["aha_entry"])
+
     def _get_character(self, unit_id: str) -> CharacterUnit | None:
         for c in self.characters:
             if c.unit_id == unit_id:
@@ -443,6 +556,26 @@ class BattleSimulator:
             self.action_queue.advance()
             return
 
+        self._resolve_skill(char, skill, action, entry, is_turn=True)
+
+    def _resolve_skill(
+        self,
+        char: CharacterUnit,
+        skill: Skill,
+        action: PlayerAction,
+        entry: ActionEntry | None,
+        is_turn: bool = True,
+    ) -> ActionLog:
+        """结算技能效果（SP/能量、伤害、削韧、buff）。
+
+        Args:
+            char: 行动角色
+            skill: 使用的技能
+            action: 玩家操作
+            entry: 行动条目（终结技插队时为 None）
+            is_turn: True=正常回合行动（推进队列、回合管理）；
+                     False=终结技插队（不推进队列、不管理回合）
+        """
         # SP / 能量结算
         if skill.sp_cost > 0:
             self.sp.consume(skill.sp_cost)
@@ -450,14 +583,17 @@ class BattleSimulator:
             self.sp.recover(-skill.sp_cost)
         if skill.energy_cost > 0:
             char.energy = max(0, char.energy - skill.energy_cost)
-        # 行动回复能量
-        char.energy = min(char.base_stats.energy_max, char.energy + 20)
+        if is_turn:
+            # 行动回复能量（终结技插队不回复）
+            char.energy = min(char.base_stats.energy_max, char.energy + 20)
 
         # 目标
-        target = self._get_enemy(action.target_id) if action.target_id else (self.enemies[0] if self.enemies else None)
+        target = self._get_enemy(action.target_id) if action.target_id else (
+            self.enemies[0] if self.enemies else None
+        )
 
         log = ActionLog(
-            av=entry.current_av,
+            av=entry.current_av if entry else 0,
             total_av=self.total_av,
             actor_id=char.unit_id,
             actor_name=char.name,
@@ -465,6 +601,7 @@ class BattleSimulator:
             target_id=target.unit_id if target else "",
             sp_after=self.sp.current,
             energy_after=char.energy,
+            notes=action.notes,
         )
 
         # 计算伤害
@@ -477,10 +614,11 @@ class BattleSimulator:
 
                 # 削韧
                 if effect.toughness_damage > 0:
-                    broken = target.reduce_toughness(effect.toughness_damage, effect.element or char.element)
+                    broken = target.reduce_toughness(
+                        effect.toughness_damage, effect.element or char.element
+                    )
                     if broken:
                         log.enemy_broken = True
-                        # 触发击破伤害
                         break_dmg = self._calc_break_damage(char, target)
                         log.damages.append(break_dmg)
                         log.total_damage += break_dmg
@@ -493,12 +631,17 @@ class BattleSimulator:
         # NEXT_ATTACK 类型 buff 失效
         char.buff_mgr.tick_attack()
 
-        # 回合结束
-        char.buff_mgr.tick_turn_end()
-        char.buff_mgr.end_turn()
+        if is_turn:
+            # 回合结束
+            char.buff_mgr.tick_turn_end()
+            char.buff_mgr.end_turn()
 
         self.logs.append(log)
-        self.action_queue.advance()
+
+        if is_turn:
+            self.action_queue.advance()
+
+        return log
 
     def _calc_skill_damage(
         self,
@@ -608,7 +751,7 @@ class BattleSimulator:
             actor_id="__aha__",
             actor_name="阿哈",
             action_type="aha_moment",
-            notes=f"阿哈时刻 #{self.aha_count}（笑点 {laugh_before}）",
+            notes=f"笑点 {laugh_before}",
         )
 
         # 1. 解除我方所有欢愉角色的控制类负面状态（暂未实现控制类 buff）
@@ -664,11 +807,7 @@ class BattleSimulator:
         # 重新获得笑点
         self._grant_laugh_point(len(elation_chars))
 
-        # 阿哈离开前：所有其他单位的 AV 减去阿哈消耗的 AV
-        for e in self.action_queue.entries:
-            if e.unit_id != "__aha__":
-                e.current_av -= consumed
-
-        # 阿哈离开行动条
-        self._remove_aha()
+        # 阿哈留在行动条上：用 advance() 正常推进 AV
+        # （所有单位 AV 减去本次消耗值，阿哈 AV 重置）
+        self.action_queue.advance()
         self.logs.append(log)

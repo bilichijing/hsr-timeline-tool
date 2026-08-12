@@ -101,13 +101,24 @@ def transform_character_list(raw: dict[str, dict]) -> list[Character]:
         if rarity == 0:
             continue  # 跳过无效稀有度
 
+        name_zh = item.get("zh", item.get("en", char_id))
+        name_en = item.get("en", "")
+        path = item.get("baseType", "")
+
+        # 主角名字为 {NICKNAME}，替换为"{命途}主"格式（如"欢愉主"）
+        if "{NICKNAME}" in name_zh:
+            path_zh = PATH_MAP.get(path, path)
+            name_zh = f"{path_zh}主"
+        if "{NICKNAME}" in name_en:
+            name_en = f"{path}Main"
+
         result.append(
             Character(
                 id=char_id,
-                name_zh=item.get("zh", item.get("en", char_id)),
-                name_en=item.get("en", ""),
+                name_zh=name_zh,
+                name_en=name_en,
                 rarity=rarity,
-                path=item.get("baseType", ""),
+                path=path,
                 element=item.get("damageType", ""),
                 icon_url=character_icon_url(char_id),
             )

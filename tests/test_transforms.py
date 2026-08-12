@@ -88,7 +88,7 @@ class TestCharacterListTransform:
         assert march7th.rarity == 4
         assert march7th.path == "Knight"
         assert march7th.element == "Ice"
-        assert "avatardrawcard/1001.webp" in march7th.icon_url
+        assert "avatarroundicon/1001.webp" in march7th.icon_url
 
     def test_all_have_icon_url(self, character_list_raw):
         result = transform_character_list(character_list_raw)

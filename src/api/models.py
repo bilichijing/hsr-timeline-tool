@@ -30,12 +30,12 @@ class Path(str, Enum):
     """命途（nanoka 原始字符串）。"""
 
     KNIGHT = "Knight"      # 存护
-    ROGUE = "Rogue"        # 毁灭
+    WARRIOR = "Warrior"    # 毁灭
     MAGE = "Mage"          # 智识
     WARLOCK = "Warlock"    # 虚无
-    SHAMAN = "Shaman"      # 丰饶
-    PRIEST = "Priest"      # 同谐
-    WARRIOR = "Warrior"    # 巡猎
+    SHAMAN = "Shaman"      # 同谐
+    PRIEST = "Priest"      # 丰饶
+    ROGUE = "Rogue"        # 巡猎
     MEMORY = "Memory"      # 记忆
     ELATION = "Elation"    # 欢愉
 
