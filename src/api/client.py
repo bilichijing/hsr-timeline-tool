@@ -6,7 +6,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from pathlib import Path
+from typing import Any
 
 import diskcache
 import httpx
@@ -21,13 +24,45 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 cache: diskcache.Cache = diskcache.Cache(str(CACHE_DIR))
 
 
+# ── 共享事件循环 ───────────────────────────────────────────
+# 应用级单线程 asyncio 循环（daemon，进程退出自动结束）。
+# httpx 全局单例 client 绑定该循环——各 worker 线程通过 run_in_loop 提交协程，
+# 避免"每线程 new loop + close 导致 client 绑定的循环已关闭"（Event loop is closed）。
+
+_LOOP: asyncio.AbstractEventLoop | None = None
+_LOOP_THREAD: threading.Thread | None = None
+_LOOP_LOCK = threading.Lock()
+
+
+def _ensure_loop() -> asyncio.AbstractEventLoop:
+    """懒启动共享事件循环（永不关闭）。"""
+    global _LOOP, _LOOP_THREAD
+    if _LOOP is None or _LOOP.is_closed():
+        with _LOOP_LOCK:
+            if _LOOP is None or _LOOP.is_closed():
+                _LOOP = asyncio.new_event_loop()
+                _LOOP_THREAD = threading.Thread(
+                    target=_LOOP.run_forever,
+                    daemon=True,
+                    name="hsr-asyncio",
+                )
+                _LOOP_THREAD.start()
+    return _LOOP
+
+
+def run_in_loop(coro) -> Any:
+    """在共享事件循环上运行协程并等待结果（工作线程调用）。"""
+    loop = _ensure_loop()
+    return asyncio.run_coroutine_threadsafe(coro, loop).result()
+
+
 # ── 异步客户端单例 ─────────────────────────────────────────
 
 _client: httpx.AsyncClient | None = None
 
 
 def get_client() -> httpx.AsyncClient:
-    """获取全局 httpx 异步客户端单例。"""
+    """获取全局 httpx 异步客户端单例（绑定共享事件循环）。"""
     global _client
     if _client is None or _client.is_closed:
         _client = httpx.AsyncClient(

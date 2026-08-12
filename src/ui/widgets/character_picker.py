@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import sys
 import threading
 from pathlib import Path
@@ -43,7 +42,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.api.client import download_character_icon, fetch_character_list
+from src.api.client import download_character_icon, fetch_character_list, run_in_loop
 from src.api.consts import ELEMENT_MAP, PATH_MAP
 from src.api.models import Character
 from src.api.transforms import transform_character_list
@@ -65,8 +64,8 @@ ICON_SIZE = QSize(96, 96)
 class _CharacterLoaderWorker(QObject):
     """后台加载角色列表 + 头像。
 
-    由于 httpx 是异步客户端，而 QThread 是同步线程，
-    这里用 QEventLoop 驱动 asyncio。
+    通过 client.run_in_loop 在共享事件循环上执行异步请求
+    （httpx 全局单例 client 绑定该循环，避免跨循环复用）。
 
     通过 cancel_event 可在下载循环中提前退出（避免对话框关闭时线程被强杀）。
     """
@@ -82,12 +81,7 @@ class _CharacterLoaderWorker(QObject):
     def run(self) -> None:
         """加载角色列表，然后逐个下载头像。"""
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(self._load_all())
-            finally:
-                loop.close()
+            run_in_loop(self._load_all())
         except Exception as e:
             self.failed.emit(str(e))
 

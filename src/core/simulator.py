@@ -25,7 +25,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .av_system import ActionEntry, ActionQueue, AV_PER_ACTION
 from .buff import Buff, BuffDuration, BuffManager, StackRule
@@ -39,6 +39,9 @@ from .damage import (
 from .skill import Skill, SkillType
 from .sp import SkillPoint
 from .stats import BaseStats, FinalStats, StatBonus, StatCalculator
+
+if TYPE_CHECKING:
+    from .characters.base import CharacterModule
 
 
 # ── 战斗单位 ──────────────────────────────────────────────
@@ -55,7 +58,9 @@ class EnemyState:
     weakness_elements: list[str]
     is_broken: bool = False
     level: int = 80
+    speed: float = 100.0             # 行动速度（默认 100，进队列用）
     resistance: dict[str, float] = field(default_factory=dict)  # {属性: 抗性}
+    def_reduce: float = 0.0  # 敌方全体减防（由角色模块写入，随条件存在与否更新）
     # 减伤 / 抗性 / 防御 buff（由 BuffManager 管理）
     buff_mgr: BuffManager = field(default_factory=lambda: BuffManager(unit_id=""))
 
@@ -75,6 +80,10 @@ class EnemyState:
             self.is_broken = True
             return True
         return False
+
+    def reduce_defense(self, rate: float) -> None:
+        """设置敌方全体减防（由角色模块维护，如不死途【饲饵】）。"""
+        self.def_reduce = rate
 
     def recover_toughness(self) -> None:
         """怪物自己行动后恢复韧性（满血）。"""
@@ -96,11 +105,13 @@ class CharacterUnit:
     skills: dict[str, Skill] = field(default_factory=dict)
     buff_mgr: BuffManager = field(default_factory=lambda: BuffManager(unit_id=""))
     energy: float = 0
+    initial_energy: float = 0.0  # 战斗开始初始能量（freesr sp_value，setup 时应用）
     # 欢愉系统
     laugh_point: float = 0   # 笑点（动态资源）
     # 好活当赏以 buff 形式存在，由 buff_mgr 管理
     is_elation: bool = False  # 是否欢愉命途
     elation_skill_index: int = 0  # 欢愉技参演编号
+    elation_skill_level: int = 1  # 欢愉技等级（识别逻辑 TODO，暂只存储）
     char_id: str = ""        # nanoka 角色 ID（用于加载头像，空表示无头像）
 
     def __post_init__(self) -> None:
@@ -134,6 +145,21 @@ class CharacterUnit:
 
 
 @dataclass
+class DamageRecord:
+    """单段伤害记录：技能类型 × 伤害类型双维度。
+
+    追加攻击（FOLLOW_UP）可造成任何伤害类型（常规/击破/超击破/持续/欢愉），
+    因此每个伤害段同时标注 skill_type 与 damage_type。
+    """
+
+    value: float
+    skill_type: SkillType
+    damage_type: DamageType
+    element: str = ""
+    target_id: str = ""
+
+
+@dataclass
 class ActionLog:
     """单次行动日志（用于 UI 展示）。"""
 
@@ -141,9 +167,10 @@ class ActionLog:
     total_av: float                    # 战斗累计总行动值
     actor_id: str
     actor_name: str
-    action_type: str                   # "normal"/"skill"/"ultra"/"monster"/"aha_moment"/...
+    action_type: str                   # "normal"/"skill"/"ultra"/"monster"/"aha_moment"/"follow_up"/...
     target_id: str = ""
     damages: list[float] = field(default_factory=list)  # 每段伤害
+    damage_records: list[DamageRecord] = field(default_factory=list)  # 每段伤害明细（技能类型×伤害类型）
     total_damage: float = 0
     sp_after: int = 3
     energy_after: float = 0
@@ -220,11 +247,17 @@ class BattleSimulator:
     aha_count: int = 0
     aha_entry: ActionEntry | None = None  # 阿哈在行动条上的实例
     current_turn: int = 0
+    # 角色技能模块（unit_id → 模块实例），由 setup() 按 char.char_id 挂载
+    char_modules: dict[str, CharacterModule] = field(default_factory=dict)
 
     def setup(self) -> None:
         """战斗初始化。"""
         # SP
         self.sp = SkillPoint(initial=self.initial_sp)
+
+        # 初始能量（freesr sp_value，钳制到能量上限；默认 0 保持原行为）
+        for char in self.characters:
+            char.energy = min(char.initial_energy, char.base_stats.energy_max)
 
         # 行动队列
         self.action_queue = ActionQueue()
@@ -237,7 +270,7 @@ class BattleSimulator:
                 is_monster=False,
             ))
         for enemy in self.enemies:
-            spd = 100  # 怪物速度默认 100（应由外部设置）
+            spd = enemy.speed
             self.action_queue.add(ActionEntry(
                 unit_id=enemy.unit_id,
                 name=enemy.name,
@@ -263,6 +296,9 @@ class BattleSimulator:
                 ))
             # 笑点 = 欢愉角色数量
             self._grant_laugh_point(len(elation_chars))
+
+        # 角色技能模块挂载（按 char.char_id 查注册表）
+        self._init_char_modules()
 
     def _grant_laugh_point(self, amount: float) -> None:
         """获得笑点（若为首次则阿哈入队）。"""
@@ -422,8 +458,7 @@ class BattleSimulator:
         if action is None:
             action = self._default_action(char)
 
-        self._character_act(char, action, actor)
-        return self.logs[-1] if self.logs else None
+        return self._character_act(char, action, actor)
 
     def execute_ultra(self, char_index: int) -> ActionLog | None:
         """释放终结技（插队，不推进行动队列，不消耗回合）。
@@ -474,6 +509,7 @@ class BattleSimulator:
             "current_turn": self.current_turn,
             "aha_count": self.aha_count,
             "aha_entry": copy.deepcopy(self.aha_entry),
+            "char_modules": copy.deepcopy(self.char_modules),
         }
 
     def restore(self, snap: dict) -> None:
@@ -488,6 +524,7 @@ class BattleSimulator:
         self.current_turn = snap["current_turn"]
         self.aha_count = snap["aha_count"]
         self.aha_entry = copy.deepcopy(snap["aha_entry"])
+        self.char_modules = copy.deepcopy(snap.get("char_modules", {}))
 
     def _get_character(self, unit_id: str) -> CharacterUnit | None:
         for c in self.characters:
@@ -554,9 +591,9 @@ class BattleSimulator:
             char.buff_mgr.tick_turn_end()
             char.buff_mgr.end_turn()
             self.action_queue.advance()
-            return
+            return None
 
-        self._resolve_skill(char, skill, action, entry, is_turn=True)
+        return self._resolve_skill(char, skill, action, entry, is_turn=True)
 
     def _resolve_skill(
         self,
@@ -584,8 +621,13 @@ class BattleSimulator:
         if skill.energy_cost > 0:
             char.energy = max(0, char.energy - skill.energy_cost)
         if is_turn:
-            # 行动回复能量（终结技插队不回复）
-            char.energy = min(char.base_stats.energy_max, char.energy + 20)
+            # 行动回复能量（终结技插队不回复；真实技能用解析出的回复值，预设为 0 时回 20）
+            # 能量恢复效率乘区：回复量 × (1 + energy_regen)
+            regen = char.final_stats().energy_regen
+            char.energy = min(
+                char.base_stats.energy_max,
+                char.energy + (skill.energy_recover or 20) * (1 + regen),
+            )
 
         # 目标
         target = self._get_enemy(action.target_id) if action.target_id else (
@@ -604,12 +646,29 @@ class BattleSimulator:
             notes=action.notes,
         )
 
+        # 技能释放钩子（模块在此标记目标、追加伤害/回 SP 等，需在伤害结算前）
+        for module in self.char_modules.values():
+            self._dispatch_hook(module, "on_skill_cast", self, char, skill, action, target, log)
+
+        # 主日志先入列：模块在 on_attack_hit / on_skill_end 中创建的追加攻击日志
+        # 自然排在本行动之后（damages 等字段仍可继续写入，列表是引用）
+        self.logs.append(log)
+
         # 计算伤害
         if target:
             for effect in skill.effects:
-                damage = self._calc_skill_damage(char, skill, effect, target)
+                damage = self._calc_skill_damage(char, effect, target)
                 log.damages.append(damage)
                 log.total_damage += damage
+                log.damage_records.append(
+                    DamageRecord(
+                        value=damage,
+                        skill_type=skill.skill_type,
+                        damage_type=effect.damage_type,
+                        element=effect.element or char.element,
+                        target_id=target.unit_id,
+                    )
+                )
                 self.total_damage += damage
 
                 # 削韧
@@ -622,11 +681,26 @@ class BattleSimulator:
                         break_dmg = self._calc_break_damage(char, target)
                         log.damages.append(break_dmg)
                         log.total_damage += break_dmg
+                        log.damage_records.append(
+                            DamageRecord(
+                                value=break_dmg,
+                                skill_type=skill.skill_type,
+                                damage_type=DamageType.BREAK,
+                                element=char.element,
+                                target_id=target.unit_id,
+                            )
+                        )
                         self.total_damage += break_dmg
 
                 # buff 触发（攻击命中）
                 char.buff_mgr.tick_attack()
                 target.buff_mgr.tick_attack()
+
+                # 攻击命中钩子（模块在此判定天赋追加攻击等）
+                for module in self.char_modules.values():
+                    self._dispatch_hook(
+                        module, "on_attack_hit", self, char, skill, target, effect, damage, log
+                    )
 
         # NEXT_ATTACK 类型 buff 失效
         char.buff_mgr.tick_attack()
@@ -636,7 +710,9 @@ class BattleSimulator:
             char.buff_mgr.tick_turn_end()
             char.buff_mgr.end_turn()
 
-        self.logs.append(log)
+        # 技能结算钩子（模块在此触发终结技强化链等；其创建的追加攻击日志排在本日志之后）
+        for module in self.char_modules.values():
+            self._dispatch_hook(module, "on_skill_end", self, char, skill, action, target, log)
 
         if is_turn:
             self.action_queue.advance()
@@ -646,8 +722,7 @@ class BattleSimulator:
     def _calc_skill_damage(
         self,
         char: CharacterUnit,
-        skill: Skill,
-        effect: Any,
+        effect: SkillEffect,
         target: EnemyState,
     ) -> float:
         """计算技能单段伤害。"""
@@ -663,11 +738,12 @@ class BattleSimulator:
         else:
             base_value = stats.atk * effect.multiplier
 
-        # 防御上下文
+        # 防御上下文（减防来自角色模块写入的 target.def_reduce）
         def_ctx = DefenseContext(
             attacker_level=char.level,
             defender_level=target.level,
             defender_defense=0,  # 怪物防御暂未建模
+            def_reduce=target.def_reduce,
         )
 
         # 减伤列表（来自目标 buff）
@@ -682,7 +758,8 @@ class BattleSimulator:
             is_weakness=is_weakness,
             is_broken=target.is_broken,
             resistance=target.resistance.get(element),
-            dmg_bonus=stats.dmg_bonus,
+            # 面板增伤已由 attacker_stats.dmg_bonus 带入，此处为技能额外增伤（默认 0）
+            dmg_bonus=0.0,
             damage_reductions=damage_reductions,
             defense_ctx=def_ctx,
             is_crit=False,  # 暴击由调用方决定
@@ -700,6 +777,7 @@ class BattleSimulator:
         def_ctx = DefenseContext(
             attacker_level=char.level,
             defender_level=target.level,
+            def_reduce=target.def_reduce,
         )
         ctx = DamageContext(
             damage_type=DamageType.BREAK,
@@ -713,6 +791,136 @@ class BattleSimulator:
             defense_ctx=def_ctx,
         )
         return calculate_damage(ctx)
+
+    # ── 角色技能模块（事件钩子分发）─────────────────────────
+
+    def _init_char_modules(self) -> None:
+        """按 char.char_id 查注册表实例化角色技能模块并触发战斗开始钩子。"""
+        # 延迟导入：characters 包导入 ashveil 触发注册，避免模块加载时循环依赖
+        from .characters import get_module_cls
+
+        self.char_modules = {}
+        for char in self.characters:
+            if not char.char_id:
+                continue
+            cls = get_module_cls(char.char_id)
+            if cls is None:
+                continue
+            module = cls()
+            self.char_modules[char.unit_id] = module
+            self._dispatch_hook(module, "on_battle_start", self, char)
+
+    def _module_for(self, char: CharacterUnit) -> CharacterModule | None:
+        """按单位 ID 取角色模块实例。"""
+        return self.char_modules.get(char.unit_id)
+
+    def _dispatch_hook(self, module: CharacterModule, hook: str, *args: Any) -> None:
+        """分发事件钩子（模块未实现则跳过）。"""
+        fn = getattr(module, hook, None)
+        if callable(fn):
+            fn(*args)
+
+    # ── 模块可用的公共 API ─────────────────────────────────
+
+    def deal_damage(
+        self,
+        attacker: CharacterUnit,
+        target: EnemyState,
+        effect: SkillEffect,
+        *,
+        skill_type: SkillType = SkillType.FOLLOW_UP,
+        log: ActionLog | None = None,
+    ) -> float:
+        """公共打伤害入口（角色模块用）。
+
+        复用技能伤害/击破伤害结算路径，记录 DamageRecord（技能类型×伤害类型），
+        累加 log 与本模拟器总伤害，并触发 on_attack_hit 钩子（含击破结算后）。
+
+        Args:
+            attacker: 攻击角色
+            target: 目标敌人
+            effect: 伤害效果段（倍率/削韧/属性）
+            skill_type: 本次伤害的技能类型（默认追加攻击）
+            log: 要写入的日志（模块自建日志时传入；None 则不记录日志）
+        """
+        damage = self._calc_skill_damage(attacker, effect, target)
+
+        if log is not None:
+            log.damages.append(damage)
+            log.total_damage += damage
+            log.damage_records.append(
+                DamageRecord(
+                    value=damage,
+                    skill_type=skill_type,
+                    damage_type=effect.damage_type,
+                    element=effect.element or attacker.element,
+                    target_id=target.unit_id,
+                )
+            )
+        self.total_damage += damage
+
+        # 削韧与击破
+        if effect.toughness_damage > 0:
+            broken = target.reduce_toughness(
+                effect.toughness_damage, effect.element or attacker.element
+            )
+            if broken:
+                log_damage = log if log is not None else None
+                break_dmg = self._calc_break_damage(attacker, target)
+                if log_damage is not None:
+                    log_damage.damages.append(break_dmg)
+                    log_damage.total_damage += break_dmg
+                    log_damage.damage_records.append(
+                        DamageRecord(
+                            value=break_dmg,
+                            skill_type=skill_type,
+                            damage_type=DamageType.BREAK,
+                            element=attacker.element,
+                            target_id=target.unit_id,
+                        )
+                    )
+                    log_damage.enemy_broken = True
+                self.total_damage += break_dmg
+
+        # 攻击命中钩子（模块可响应，如天赋追加攻击判定；skill 非模块发起时为 None）
+        attacker.buff_mgr.tick_attack()
+        target.buff_mgr.tick_attack()
+        for module in self.char_modules.values():
+            self._dispatch_hook(module, "on_attack_hit", self, attacker, None, target, effect, damage, log)
+
+        return damage
+
+    def make_follow_up_log(
+        self,
+        actor: CharacterUnit,
+        target: EnemyState,
+        *,
+        notes: str = "",
+    ) -> ActionLog:
+        """创建追加攻击日志（不推进队列、不管理回合）。
+
+        action_type="follow_up"，av=0（无行动消耗），记录当前 SP/能量快照。
+        """
+        log = ActionLog(
+            av=0,
+            total_av=self.total_av,
+            actor_id=actor.unit_id,
+            actor_name=actor.name,
+            action_type="follow_up",
+            target_id=target.unit_id,
+            sp_after=self.sp.current,
+            energy_after=actor.energy,
+            notes=notes,
+        )
+        self.logs.append(log)
+        return log
+
+    def recover_energy(self, char: CharacterUnit, amount: float) -> float:
+        """回复角色能量（能量恢复效率 ×(1+regen)，钳制到能量上限），返回实际回复量。"""
+        before = char.energy
+        actual = amount * (1 + char.final_stats().energy_regen)
+        char.energy = min(char.base_stats.energy_max, char.energy + actual)
+        return char.energy - before
 
     def _monster_act(self, entry: ActionEntry) -> None:
         """怪物行动。"""

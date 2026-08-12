@@ -53,6 +53,7 @@ ACTION_COLORS: dict[str, QColor] = {
     "ultra":      QColor(212, 168, 87),    # 金色（终结技）
     "monster":    QColor(229, 84, 78),     # 红色（怪物）
     "aha_moment": QColor(232, 184, 87),    # 亮金（阿哈时刻）
+    "follow_up":  QColor(168, 130, 212),   # 紫色（追加攻击）
 }
 
 ACTION_LABELS_ZH: dict[str, str] = {
@@ -61,6 +62,7 @@ ACTION_LABELS_ZH: dict[str, str] = {
     "ultra": "终结技",
     "monster": "怪物行动",
     "aha_moment": "阿哈时刻",
+    "follow_up": "追加攻击",
 }
 
 LANE_HEIGHT = 44
@@ -229,7 +231,7 @@ class TimelineGanttWidget(QWidget):
                 painter.drawEllipse(QPoint(int(x), y), DOT_RADIUS + 3, DOT_RADIUS + 3)
 
             # 操作类型字母（普/战/终/怪/哈）
-            label_map = {"normal": "普", "skill": "战", "ultra": "终", "monster": "怪", "aha_moment": "哈"}
+            label_map = {"normal": "普", "skill": "战", "ultra": "终", "monster": "怪", "aha_moment": "哈", "follow_up": "追"}
             label = label_map.get(action.action_type, "?")
             painter.setPen(QPen(QColor(Colors.BG_DEEPEST)))
             font = QFont("Microsoft YaHei UI", 8, QFont.Bold)

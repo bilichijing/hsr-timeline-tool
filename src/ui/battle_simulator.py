@@ -10,14 +10,17 @@
 
 from __future__ import annotations
 
+import json
 import sys
+from dataclasses import dataclass, field
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QFont, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -39,8 +42,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.api.client import fetch_character_detail, fetch_lightcone_detail, run_in_loop
 from src.api.consts import ELEMENT_MAP, PATH_MAP
+from src.api.transforms import (
+    pick_lightcone_stats80,
+    transform_character_detail,
+    transform_lightcone_detail,
+)
+from src.core.character_factory import build_character_unit
 from src.core.damage import DamageType
+from src.core.freesr import compute_panel, parse_freesr
 from src.core.simulator import (
     BattleEndReason,
     BattleSimulator,
@@ -73,7 +84,126 @@ ACTION_NAMES_ZH: dict[str, str] = {
     "ultra": "终结技",
     "monster": "怪物行动",
     "aha_moment": "阿哈时刻",
+    "follow_up": "追加攻击",
 }
+
+
+# ── 队伍表格行数据与列号 ──────────────────────────────────
+
+# 队伍表格列号（12 项属性 + 名称/命途/属性）
+COL_NAME, COL_PATH, COL_ELEMENT = 0, 1, 2
+COL_HP, COL_ATK, COL_DEF, COL_SPD = 3, 4, 5, 6
+COL_CRIT_RATE, COL_CRIT_DMG, COL_BREAK_EFFECT, COL_EFFECT_RES = 7, 8, 9, 10
+COL_ENERGY_REGEN, COL_EFFECT_HIT, COL_OUTGOING_HEAL, COL_DMG_BONUS = 11, 12, 13, 14
+COL_COUNT = 15
+
+# 百分比列（数值为小数，0.05 = 5%）
+PERCENT_COLUMNS = {
+    COL_CRIT_RATE, COL_CRIT_DMG, COL_BREAK_EFFECT, COL_EFFECT_RES,
+    COL_ENERGY_REGEN, COL_EFFECT_HIT, COL_OUTGOING_HEAL, COL_DMG_BONUS,
+}
+
+TABLE_HEADERS = [
+    "名称", "命途", "属性",
+    "生命值", "攻击力", "防御力", "速度",
+    "暴击率", "暴击伤害", "击破特攻", "效果抵抗",
+    "能量恢复效率", "效果命中", "治疗量加成", "属性增伤",
+]
+
+
+@dataclass
+class _RowCharData:
+    """队伍表格一行的角色数据（存名称列 Qt.UserRole）。"""
+
+    char_id: str = ""
+    name: str = ""
+    path: str = ""
+    element: str = ""
+    sp_need: int = 0
+    stats80: dict = field(default_factory=dict)   # 详情 stats["6"]
+    skills_raw: dict = field(default_factory=dict)
+    skill_trees_raw: dict = field(default_factory=dict)  # 原始行迹（行迹属性加成）
+    loaded: bool = False                          # 真实详情是否已就绪
+    # freesr 导入数据（供未来套装效果/星魂使用）
+    sp_value: float = 0.0    # 初始能量（freesr sp_value）
+    rank: int = 0            # 星魂（freesr data.rank）
+    relics_raw: list = field(default_factory=list)     # freesr 原始遗器列表
+    lightcone_raw: list = field(default_factory=list)  # freesr 原始光锥列表
+
+
+# ── 角色详情后台加载线程 ──────────────────────────────────
+
+
+class _CharacterDetailWorker(QObject):
+    """后台加载单个角色详情（共享事件循环 run_in_loop）。
+
+    每行独立的一次性线程；diskcache 缓存详情（1h），二次选择秒开。
+    """
+
+    loaded = Signal(int, object)   # (row, payload: {sp_need, stats80, skills_raw})
+    failed = Signal(int, str)      # (row, error)
+
+    def __init__(self, char_id: str, row: int) -> None:
+        super().__init__()
+        self.char_id = char_id
+        self.row = row
+
+    def run(self) -> None:
+        try:
+            payload = run_in_loop(self._load())
+            self.loaded.emit(self.row, payload)
+        except Exception as e:
+            self.failed.emit(self.row, str(e))
+        finally:
+            # 一次性线程：任务完成立即退出线程，触发 finished → 自动回收
+            QThread.currentThread().quit()
+
+    async def _load(self) -> dict:
+        raw = await fetch_character_detail(self.char_id)
+        info = transform_character_detail(raw, self.char_id)
+        stats80 = {}
+        # stats 键为突破等级 "0"-"6"，优先取 "6"（80 级），缺省取最大键
+        if info.stats:
+            key = "6" if "6" in info.stats else max(info.stats.keys(), key=lambda k: int(k))
+            stats80 = info.stats[key].model_dump()
+        return {
+            "char_id": self.char_id,
+            "sp_need": info.sp_need,
+            "stats80": stats80,
+            "skills_raw": info.skills,
+            "skill_trees_raw": info.skill_trees,
+        }
+
+
+class _FreesrLightconeWorker(QObject):
+    """后台加载全部光锥详情（单个一次性线程，diskcache 命中秒回）。"""
+
+    loaded = Signal(object, object)   # ({item_id: stats80 行}, [失败 item_id 列表])
+
+    def __init__(self, item_ids: list[int]) -> None:
+        super().__init__()
+        self.item_ids = item_ids
+
+    def run(self) -> None:
+        try:
+            rows, failed = run_in_loop(self._load())
+            self.loaded.emit(rows, failed)
+        except Exception as e:
+            self.loaded.emit({}, [str(e)])
+        finally:
+            QThread.currentThread().quit()
+
+    async def _load(self) -> tuple[dict, list]:
+        rows: dict = {}
+        failed: list = []
+        for item_id in self.item_ids:
+            try:
+                raw = await fetch_lightcone_detail(item_id)
+                info = transform_lightcone_detail(raw, str(item_id))
+                rows[item_id] = pick_lightcone_stats80(info)
+            except Exception:
+                failed.append(item_id)
+        return rows, failed
 
 
 # ── 预设角色构造 ──────────────────────────────────────────
@@ -84,22 +214,32 @@ def make_preset_character(
     name: str,
     path: str,
     element: str,
+    hp: float = 10000,
     atk: float = 1000,
+    def_: float = 500,
     spd: float = 100,
     crit_rate: float = 0.05,
     crit_dmg: float = 0.5,
-    dmg_bonus: float = 0.0,
     break_effect: float = 0.0,
+    effect_hit: float = 0.0,
+    effect_res: float = 0.0,
+    energy_regen: float = 0.0,
+    outgoing_heal: float = 0.0,
+    dmg_bonus: float = 0.0,
 ) -> CharacterUnit:
     """构造预设角色（带普攻/战技/终结技）。"""
     base = BaseStats(
-        hp_base=10000,
+        hp_base=hp,
         atk_base=atk,
-        def_base=500,
+        def_base=def_,
         spd_base=spd,
         crit_rate=crit_rate,
         crit_dmg=crit_dmg,
         break_effect=break_effect,
+        effect_hit=effect_hit,
+        effect_res=effect_res,
+        energy_regen=energy_regen,
+        outgoing_heal=outgoing_heal,
     )
     bonus = StatBonus(dmg_bonus=dmg_bonus)
 
@@ -141,6 +281,9 @@ def make_preset_character(
             element=element,
         )],
     )
+
+    # 能量上限与终结技耗能对齐（否则能量永远无法达到耗能要求，放不出终结技）
+    base.energy_max = 120
 
     return CharacterUnit(
         unit_id=unit_id,
@@ -339,12 +482,34 @@ class BattleSimulatorWindow(QMainWindow):
         # 队伍配置
         team_group = QGroupBox("队伍配置（双击名称列可选择角色）")
         team_layout = QVBoxLayout(team_group)
-        self.team_table = QTableWidget(4, 7)
-        self.team_table.setHorizontalHeaderLabels(
-            ["名称", "命途", "属性", "攻击力", "速度", "暴击率", "暴击伤害"]
-        )
-        self.team_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.team_table.verticalHeader().setDefaultSectionSize(36)
+        import_row = QHBoxLayout()
+        import_btn = QPushButton("导入 freesr-data.json")
+        import_btn.setCursor(Qt.PointingHandCursor)
+        import_btn.clicked.connect(self._import_freesr)
+        import_row.addWidget(import_btn)
+        import_row.addStretch()
+        team_layout.addLayout(import_row)
+        self.team_table = QTableWidget(4, COL_COUNT)
+        self.team_table.setHorizontalHeaderLabels(TABLE_HEADERS)
+        header = self.team_table.horizontalHeader()
+        # 名称/命途/属性可伸缩，12 项属性固定宽度，横向滚动
+        for col in range(3):
+            header.setSectionResizeMode(col, QHeaderView.Interactive)
+        for col in range(3, COL_COUNT):
+            header.setSectionResizeMode(col, QHeaderView.Fixed)
+        header.setDefaultSectionSize(90)
+        # 表头 tooltip：百分比列注明小数格式；属性增伤注明适用角色自身属性
+        for col in range(3, COL_COUNT):
+            tip = TABLE_HEADERS[col]
+            if col in PERCENT_COLUMNS:
+                tip += "（小数，0.05 = 5%）"
+            if col == COL_DMG_BONUS:
+                tip += "（仅该角色自身属性）"
+            item = QTableWidgetItem(TABLE_HEADERS[col])
+            item.setToolTip(tip)
+            self.team_table.setHorizontalHeaderItem(col, item)
+        self.team_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.team_table.verticalHeader().setDefaultSectionSize(30)
         self.team_table.setAlternatingRowColors(True)
         self.team_table.cellDoubleClicked.connect(self._on_team_cell_double_clicked)
         team_layout.addWidget(self.team_table)
@@ -396,6 +561,39 @@ class BattleSimulatorWindow(QMainWindow):
         bottom_layout.addWidget(params_group)
 
         layout.addLayout(bottom_layout)
+
+        # 技能等级（全局，按技能类型分级；忆灵/欢愉为对应命途专用）
+        skill_group = QGroupBox("技能等级（全局）")
+        skill_form = QFormLayout(skill_group)
+        skill_form.setSpacing(8)
+        self.skill_level_normal_spin = QSpinBox()
+        self.skill_level_normal_spin.setRange(1, 10)
+        self.skill_level_normal_spin.setValue(1)
+        skill_form.addRow("普攻", self.skill_level_normal_spin)
+        self.skill_level_skill_spin = QSpinBox()
+        self.skill_level_skill_spin.setRange(1, 15)
+        self.skill_level_skill_spin.setValue(1)
+        skill_form.addRow("战技", self.skill_level_skill_spin)
+        self.skill_level_ultra_spin = QSpinBox()
+        self.skill_level_ultra_spin.setRange(1, 15)
+        self.skill_level_ultra_spin.setValue(1)
+        skill_form.addRow("终结技", self.skill_level_ultra_spin)
+        self.skill_level_talent_spin = QSpinBox()
+        self.skill_level_talent_spin.setRange(1, 15)
+        self.skill_level_talent_spin.setValue(1)
+        skill_form.addRow("天赋", self.skill_level_talent_spin)
+        self.skill_level_memo_spin = QSpinBox()
+        self.skill_level_memo_spin.setRange(1, 15)
+        self.skill_level_memo_spin.setValue(1)
+        self.skill_level_memo_spin.setToolTip("记忆命途角色（忆灵技）专用")
+        skill_form.addRow("忆灵技", self.skill_level_memo_spin)
+        self.elation_skill_level_spin = QSpinBox()
+        self.elation_skill_level_spin.setRange(1, 15)
+        self.elation_skill_level_spin.setValue(1)
+        self.elation_skill_level_spin.setToolTip("欢愉命途角色（欢愉技）专用；技能数据识别 TODO")
+        skill_form.addRow("欢愉技", self.elation_skill_level_spin)
+        layout.addWidget(skill_group)
+
         layout.addStretch()
 
         scroll.setWidget(content)
@@ -728,11 +926,295 @@ class BattleSimulatorWindow(QMainWindow):
         if picker.exec() == QDialog.Accepted and picker.selected_character:
             c = picker.selected_character
             name_item = QTableWidgetItem(c.name_zh or c.name_en)
-            # 在名称列存储 nanoka 角色 ID（用于加载头像）
-            name_item.setData(Qt.UserRole, c.id)
+            # 名称列存储行角色数据（真实详情加载完成后回填）
+            name_item.setData(
+                Qt.UserRole,
+                _RowCharData(char_id=c.id, name=c.name_zh or c.name_en, path=c.path, element=c.element),
+            )
             self.team_table.setItem(row, 0, name_item)
             self.team_table.setItem(row, 1, QTableWidgetItem(PATH_MAP.get(c.path, c.path)))
             self.team_table.setItem(row, 2, QTableWidgetItem(ELEMENT_MAP.get(c.element, c.element)))
+            self._update_element_bonus_tooltips()
+            self._update_overview()
+            # 异步加载真实详情（技能/面板自动填充）
+            self._start_detail_load(row, c.id)
+
+    # ── 详情异步加载 ────────────────────────────────────
+
+    def _start_detail_load(self, row: int, char_id: str) -> None:
+        """启动单行角色详情加载线程（一次性，finished 后自动回收）。"""
+        if not hasattr(self, "_detail_threads"):
+            self._detail_threads: dict[int, QThread] = {}
+            self._detail_workers: dict[int, QObject] = {}
+        thread = QThread()
+        worker = _CharacterDetailWorker(char_id, row)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.loaded.connect(self._on_detail_loaded)
+        worker.failed.connect(self._on_detail_failed)
+        # 线程结束自动回收
+        thread.finished.connect(thread.deleteLater)
+        # 关键：worker 无 parent，必须保存在实例属性避免被 GC 回收
+        # （回收会触发 destroyed → thread.quit，导致 run 未执行线程就退出）
+        self._detail_threads[row] = thread
+        self._detail_workers[row] = worker
+
+        def _cleanup(r: int = row) -> None:
+            self._detail_threads.pop(r, None)
+            self._detail_workers.pop(r, None)
+
+        thread.finished.connect(_cleanup)
+        thread.start()
+
+    def _on_detail_loaded(self, row: int, payload: dict) -> None:
+        """详情加载完成：校验行角色一致性后回填并自动填充面板列。"""
+        if row >= self.team_table.rowCount():
+            return
+        name_item = self.team_table.item(row, 0)
+        if name_item is None:
+            return
+        row_data = name_item.data(Qt.UserRole)
+        if not isinstance(row_data, _RowCharData) or not row_data.char_id:
+            return
+        # 防连选竞态：仅当载荷与当前行角色一致才写入
+        if payload.get("char_id") != row_data.char_id:
+            return
+
+        row_data.sp_need = payload.get("sp_need", 0)
+        row_data.stats80 = payload.get("stats80", {})
+        row_data.skills_raw = payload.get("skills_raw", {})
+        row_data.skill_trees_raw = payload.get("skill_trees_raw", {})
+        row_data.loaded = True
+        name_item.setData(Qt.UserRole, row_data)
+
+        # 自动填充面板列（真实基础值，用户可手动修改模拟遗器加成）
+        s = row_data.stats80
+        self._set_cell_value(row, COL_HP, int(s.get("hp_base", 0) + s.get("hp_add", 0) * 80))
+        self._set_cell_value(row, COL_ATK, int(s.get("attack_base", 0) + s.get("attack_add", 0) * 80))
+        self._set_cell_value(row, COL_DEF, int(s.get("defence_base", 0) + s.get("defence_add", 0) * 80))
+        self._set_cell_value(row, COL_SPD, float(s.get("speed_base", 0)))
+        self._set_cell_value(row, COL_CRIT_RATE, float(s.get("critical_chance", 0.05)))
+        self._set_cell_value(row, COL_CRIT_DMG, float(s.get("critical_damage", 0.5)))
+        self._update_overview()
+
+        # freesr 导入时序钩子：详情加载完成时补填已导入行的最终面板
+        job = getattr(self, "_freesr_job", None)
+        if job and any(r == row for r, _ in job["matched"]):
+            self._fill_freesr_panels()
+
+    def _on_detail_failed(self, row: int, err: str) -> None:
+        """详情加载失败：提示并保持预设技能。"""
+        if row >= self.team_table.rowCount():
+            return
+        name_item = self.team_table.item(row, 0)
+        name = name_item.text() if name_item else f"角色 {row + 1}"
+        QMessageBox.warning(
+            self, "数据加载失败",
+            f"角色「{name}」真实数据加载失败：{err}\n将使用预设技能数据",
+        )
+
+    def _set_cell_value(self, row: int, col: int, value) -> None:
+        """写入面板列（百分比列 4 位小数，速度 1 位小数，其余原样）。"""
+        if col in PERCENT_COLUMNS:
+            text = f"{value:.4f}"
+        elif col == COL_SPD:
+            text = f"{value:.1f}"
+        else:
+            text = str(value)
+        self.team_table.setItem(row, col, QTableWidgetItem(text))
+
+    def _update_element_bonus_tooltips(self) -> None:
+        """属性增伤列 tooltip：按行角色属性动态标注。"""
+        if not hasattr(self, "team_table"):
+            return
+        for row in range(self.team_table.rowCount()):
+            elem_item = self.team_table.item(row, 2)
+            elem_zh = elem_item.text().strip() if elem_item else ""
+            item = self.team_table.item(row, COL_DMG_BONUS)
+            if item is None:
+                item = QTableWidgetItem("0")
+                self.team_table.setItem(row, COL_DMG_BONUS, item)
+            item.setToolTip(f"适用于{elem_zh}的伤害加成" if elem_zh else "属性伤害加成")
+
+    # ── freesr 导入 ────────────────────────────────────
+
+    def _import_freesr(self) -> None:
+        """导入 freesr-data.json：选文件 → 解析 → 匹配队伍 → 填面板。"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择 freesr-data.json", "", "JSON 文件 (*.json);;所有文件 (*)"
+        )
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                raw = json.load(f)
+            profile = parse_freesr(raw)
+        except Exception as e:
+            QMessageBox.warning(self, "导入失败", f"解析 freesr-data.json 失败: {e}")
+            return
+
+        if not profile.avatars:
+            QMessageBox.information(self, "导入", "文件中没有已配置的角色（无有效数据）")
+            return
+
+        matched, unmatched = self._apply_freesr_profile(profile)
+
+        # 记录导入任务（光锥详情异步加载完成后填面板）
+        self._freesr_job = {
+            "profile": profile,
+            "matched": matched,
+            "lightcone_rows": {},      # {item_id: stats80 行}
+            "lc_failed": [],
+        }
+
+        # 收集需要的光锥详情（去重）
+        item_ids = sorted({
+            lc.item_id for lcs in profile.lightcones.values() for lc in lcs
+        })
+        if item_ids:
+            self._start_freesr_lightcone_load(item_ids)
+        else:
+            self._fill_freesr_panels()
+
+        if unmatched:
+            # 未匹配提示截断（freesr 空配置的 data 也计入，可能很多）
+            shown = unmatched[:10]
+            suffix = f"\n…等 {len(unmatched)} 个角色" if len(unmatched) > 10 else ""
+            QMessageBox.information(
+                self, "导入完成",
+                f"已导入 {len(matched)} 个角色。\n\n以下角色已配置但不在队伍中：\n"
+                + "\n".join(shown) + suffix,
+            )
+        else:
+            QMessageBox.information(self, "导入完成", f"已导入 {len(matched)} 个角色")
+
+    def _apply_freesr_profile(
+        self, profile,
+    ) -> tuple[list[tuple[int, str]], list[str]]:
+        """按 char_id 匹配队伍行：写入行数据 + 更新技能等级 SpinBox。
+
+        Returns:
+            (matched: [(row, char_id)], unmatched: [char_id])
+        """
+        # char_id → row 映射
+        row_by_char: dict[str, int] = {}
+        for row in range(self.team_table.rowCount()):
+            name_item = self.team_table.item(row, 0)
+            if name_item is None:
+                continue
+            row_data = name_item.data(Qt.UserRole)
+            if isinstance(row_data, _RowCharData) and row_data.char_id:
+                row_by_char[row_data.char_id] = row
+
+        matched: list[tuple[int, str]] = []
+        unmatched: list[str] = []
+        for char_id, avatar in profile.avatars.items():
+            row = row_by_char.get(char_id)
+            if row is None:
+                unmatched.append(char_id)
+                continue
+            name_item = self.team_table.item(row, 0)
+            row_data = name_item.data(Qt.UserRole)
+            row_data.sp_value = avatar.sp_value
+            row_data.rank = avatar.rank
+            row_data.relics_raw = [
+                r.raw for r in profile.relics.get(char_id, [])
+            ]
+            row_data.lightcone_raw = [
+                lc.raw for lc in profile.lightcones.get(char_id, [])
+            ]
+            name_item.setData(Qt.UserRole, row_data)
+            # 技能等级 → 全局 SpinBox（freesr 主技能）
+            levels = avatar.skill_levels
+            if SkillType.NORMAL in levels:
+                self.skill_level_normal_spin.setValue(levels[SkillType.NORMAL])
+            if SkillType.SKILL in levels:
+                self.skill_level_skill_spin.setValue(levels[SkillType.SKILL])
+            if SkillType.ULTRA in levels:
+                self.skill_level_ultra_spin.setValue(levels[SkillType.ULTRA])
+            if SkillType.TALENT in levels:
+                self.skill_level_talent_spin.setValue(levels[SkillType.TALENT])
+            # sp_max 兜底 sp_need（详情未加载时能量上限）
+            if avatar.sp_max > 0 and row_data.sp_need == 0:
+                row_data.sp_need = avatar.sp_max
+            matched.append((row, char_id))
+        return matched, unmatched
+
+    def _start_freesr_lightcone_load(self, item_ids: list[int]) -> None:
+        """启动光锥详情加载线程（一次性，finished 后自动回收）。"""
+        if not hasattr(self, "_lc_threads"):
+            self._lc_threads: dict[str, QThread] = {}
+            self._lc_workers: dict[str, QObject] = {}
+        thread = QThread()
+        worker = _FreesrLightconeWorker(item_ids)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.loaded.connect(self._on_freesr_lightcone_loaded)
+        thread.finished.connect(thread.deleteLater)
+        key = ",".join(str(i) for i in item_ids)
+        self._lc_threads[key] = thread
+        self._lc_workers[key] = worker
+
+        def _cleanup(k: str = key) -> None:
+            self._lc_threads.pop(k, None)
+            self._lc_workers.pop(k, None)
+
+        thread.finished.connect(_cleanup)
+        thread.start()
+
+    def _on_freesr_lightcone_loaded(self, rows: dict, failed: list) -> None:
+        """光锥详情就绪：更新导入任务并填面板；失败的按 0 处理并提示。"""
+        job = getattr(self, "_freesr_job", None)
+        if job is None:
+            return
+        job["lightcone_rows"].update(rows)
+        job["lc_failed"] = list(failed)
+        self._fill_freesr_panels()
+        if failed:
+            QMessageBox.warning(
+                self, "光锥数据加载失败",
+                f"以下光锥详情加载失败，其属性按 0 处理：{failed}",
+            )
+
+    def _fill_freesr_panels(self) -> None:
+        """为已就绪的匹配行计算并填写最终面板（幂等，可多次调用）。"""
+        job = getattr(self, "_freesr_job", None)
+        if not job:
+            return
+        profile = job["profile"]
+        for row, char_id in job["matched"]:
+            name_item = self.team_table.item(row, 0)
+            if name_item is None:
+                continue
+            row_data = name_item.data(Qt.UserRole)
+            if not isinstance(row_data, _RowCharData) or not row_data.stats80:
+                continue  # 详情未就绪，等待 _on_detail_loaded 钩子补调
+
+            # 光锥 80 级行（缺失按 0 处理）
+            lc_stats80 = None
+            lcs = profile.lightcones.get(char_id, [])
+            if lcs:
+                item_id = lcs[0].item_id
+                lc_stats80 = job["lightcone_rows"].get(item_id)
+
+            final = compute_panel(
+                row_data.stats80,
+                profile.relics.get(char_id, []),
+                lc_stats80,
+                row_data.skill_trees_raw,
+            )
+            self._set_cell_value(row, COL_HP, int(final.hp))
+            self._set_cell_value(row, COL_ATK, int(final.atk))
+            self._set_cell_value(row, COL_DEF, int(final.defense))
+            self._set_cell_value(row, COL_SPD, final.spd)
+            self._set_cell_value(row, COL_CRIT_RATE, final.crit_rate)
+            self._set_cell_value(row, COL_CRIT_DMG, final.crit_dmg)
+            self._set_cell_value(row, COL_BREAK_EFFECT, final.break_effect)
+            self._set_cell_value(row, COL_EFFECT_RES, final.effect_res)
+            self._set_cell_value(row, COL_ENERGY_REGEN, final.energy_regen)
+            self._set_cell_value(row, COL_EFFECT_HIT, final.effect_hit)
+            self._set_cell_value(row, COL_OUTGOING_HEAL, final.outgoing_heal)
+            self._set_cell_value(row, COL_DMG_BONUS, final.dmg_bonus)
             self._update_overview()
 
     # ── 默认配置 ─────────────────────────────────────
@@ -740,44 +1222,124 @@ class BattleSimulatorWindow(QMainWindow):
     def _load_default_config(self) -> None:
         """加载默认配置。"""
         defaults = [
-            ("char1", "角色A", "存护", "火", 1200, 100, 0.05, 0.5),
-            ("char2", "角色B", "巡猎", "冰", 1100, 134, 0.30, 1.0),
-            ("char3", "角色C", "智识", "雷", 1300, 110, 0.10, 0.7),
-            ("char4", "角色D", "欢愉", "风", 1000, 120, 0.05, 0.5),
+            ("char1", "角色A", "存护", "火", 10000, 1200, 500, 100, 0.05, 0.5),
+            ("char2", "角色B", "巡猎", "冰", 9000, 1100, 480, 134, 0.30, 1.0),
+            ("char3", "角色C", "智识", "雷", 8000, 1300, 420, 110, 0.10, 0.7),
+            ("char4", "角色D", "欢愉", "风", 10000, 1000, 500, 120, 0.05, 0.5),
         ]
-        for row, (uid, name, path, elem, atk, spd, cr, cd) in enumerate(defaults):
-            self.team_table.setItem(row, 0, QTableWidgetItem(name))
+        for row, (uid, name, path, elem, hp, atk, def_, spd, cr, cd) in enumerate(defaults):
+            name_item = QTableWidgetItem(name)
+            # 重置行数据（清掉可能的旧真实角色残留）
+            name_item.setData(Qt.UserRole, _RowCharData(char_id=""))
+            self.team_table.setItem(row, 0, name_item)
             self.team_table.setItem(row, 1, QTableWidgetItem(path))
             self.team_table.setItem(row, 2, QTableWidgetItem(elem))
-            self.team_table.setItem(row, 3, QTableWidgetItem(str(atk)))
-            self.team_table.setItem(row, 4, QTableWidgetItem(str(spd)))
-            self.team_table.setItem(row, 5, QTableWidgetItem(str(cr)))
-            self.team_table.setItem(row, 6, QTableWidgetItem(str(cd)))
+            self._set_cell_value(row, COL_HP, hp)
+            self._set_cell_value(row, COL_ATK, atk)
+            self._set_cell_value(row, COL_DEF, def_)
+            self._set_cell_value(row, COL_SPD, spd)
+            self._set_cell_value(row, COL_CRIT_RATE, cr)
+            self._set_cell_value(row, COL_CRIT_DMG, cd)
+            for col in (COL_BREAK_EFFECT, COL_EFFECT_RES, COL_ENERGY_REGEN,
+                        COL_EFFECT_HIT, COL_OUTGOING_HEAL, COL_DMG_BONUS):
+                self._set_cell_value(row, col, 0.0)
+        self._update_element_bonus_tooltips()
         self._update_overview()
 
     # ── 读取配置 ─────────────────────────────────────
 
-    def _collect_config(self) -> tuple[list[CharacterUnit], list[EnemyState], int, int, int]:
-        """从 UI 读取配置（命途/属性中文 → 英文）。"""
+    def _collect_config(self) -> tuple[list[CharacterUnit], list[EnemyState], int, int, int, list[str]]:
+        """从 UI 读取配置（命途/属性中文 → 英文）。
+
+        Returns:
+            (characters, enemies, sp, max_av, action_mode, warnings)
+            warnings: 真实数据未就绪而回退预设的角色提示
+        """
         characters = []
+        warnings: list[str] = []
+
+        def cell_text(row: int, col: int, default: str) -> str:
+            item = self.team_table.item(row, col)
+            return item.text().strip() if item else default
+
+        def cell_float(row: int, col: int, default: float) -> float:
+            try:
+                return float(cell_text(row, col, "") or default)
+            except ValueError:
+                return default
+
+        # 技能等级（全局）
+        skill_levels = {
+            SkillType.NORMAL: self.skill_level_normal_spin.value(),
+            SkillType.SKILL: self.skill_level_skill_spin.value(),
+            SkillType.ULTRA: self.skill_level_ultra_spin.value(),
+            SkillType.TALENT: self.skill_level_talent_spin.value(),
+            SkillType.MEMO_DNSKILL: self.skill_level_memo_spin.value(),
+        }
+
         for row in range(self.team_table.rowCount()):
             name_item = self.team_table.item(row, 0)
             if not name_item or not name_item.text().strip():
                 continue
             name = name_item.text().strip()
             uid = f"char{row+1}"
-            # 读取 nanoka 角色 ID（用于加载头像）
-            char_id = name_item.data(Qt.UserRole) or ""
-            path_zh = self.team_table.item(row, 1).text().strip() if self.team_table.item(row, 1) else "存护"
+            path_zh = cell_text(row, COL_PATH, "存护")
             path = PATH_MAP_ZH_TO_EN.get(path_zh, path_zh)
-            elem_zh = self.team_table.item(row, 2).text().strip() if self.team_table.item(row, 2) else "火"
+            elem_zh = cell_text(row, COL_ELEMENT, "火")
             elem = ELEMENT_MAP_ZH_TO_EN.get(elem_zh, elem_zh)
-            atk = float(self.team_table.item(row, 3).text() or "1000") if self.team_table.item(row, 3) else 1000
-            spd = float(self.team_table.item(row, 4).text() or "100") if self.team_table.item(row, 4) else 100
-            cr = float(self.team_table.item(row, 5).text() or "0.05") if self.team_table.item(row, 5) else 0.05
-            cd = float(self.team_table.item(row, 6).text() or "0.5") if self.team_table.item(row, 6) else 0.5
-            char = make_preset_character(uid, name, path, elem, atk, spd, cr, cd)
-            char.char_id = str(char_id)
+
+            row_data = name_item.data(Qt.UserRole)
+            if isinstance(row_data, _RowCharData) and row_data.loaded and row_data.skills_raw:
+                # 真实角色：真实技能 + 真实面板（表格数值已自动填充，用户可改的为面板）
+                char = build_character_unit(
+                    unit_id=uid,
+                    name=name,
+                    path=path,
+                    element=elem,
+                    stats80=row_data.stats80,
+                    skills_raw=row_data.skills_raw,
+                    sp_need=row_data.sp_need,
+                    skill_levels=skill_levels,
+                    elation_skill_level=self.elation_skill_level_spin.value(),
+                    char_id=row_data.char_id,
+                    dmg_bonus=cell_float(row, COL_DMG_BONUS, 0.0),
+                    initial_energy=row_data.sp_value,
+                    skill_trees_raw=row_data.skill_trees_raw,
+                )
+                # 用户手动编辑的面板数值覆盖真实基础值（模拟遗器加成）
+                char.base_stats.hp_base = cell_float(row, COL_HP, char.base_stats.hp_base)
+                char.base_stats.atk_base = cell_float(row, COL_ATK, char.base_stats.atk_base)
+                char.base_stats.def_base = cell_float(row, COL_DEF, char.base_stats.def_base)
+                char.base_stats.spd_base = cell_float(row, COL_SPD, char.base_stats.spd_base)
+                char.base_stats.crit_rate = cell_float(row, COL_CRIT_RATE, char.base_stats.crit_rate)
+                char.base_stats.crit_dmg = cell_float(row, COL_CRIT_DMG, char.base_stats.crit_dmg)
+                char.base_stats.break_effect = cell_float(row, COL_BREAK_EFFECT, 0.0)
+                char.base_stats.effect_res = cell_float(row, COL_EFFECT_RES, 0.0)
+                char.base_stats.energy_regen = cell_float(row, COL_ENERGY_REGEN, 0.0)
+                char.base_stats.effect_hit = cell_float(row, COL_EFFECT_HIT, 0.0)
+                char.base_stats.outgoing_heal = cell_float(row, COL_OUTGOING_HEAL, 0.0)
+                characters.append(char)
+                continue
+
+            # 预设角色（或真实数据未就绪回退）
+            char = make_preset_character(
+                uid, name, path, elem,
+                hp=cell_float(row, COL_HP, 10000),
+                atk=cell_float(row, COL_ATK, 1000),
+                def_=cell_float(row, COL_DEF, 500),
+                spd=cell_float(row, COL_SPD, 100),
+                crit_rate=cell_float(row, COL_CRIT_RATE, 0.05),
+                crit_dmg=cell_float(row, COL_CRIT_DMG, 0.5),
+                break_effect=cell_float(row, COL_BREAK_EFFECT, 0.0),
+                effect_res=cell_float(row, COL_EFFECT_RES, 0.0),
+                energy_regen=cell_float(row, COL_ENERGY_REGEN, 0.0),
+                effect_hit=cell_float(row, COL_EFFECT_HIT, 0.0),
+                outgoing_heal=cell_float(row, COL_OUTGOING_HEAL, 0.0),
+                dmg_bonus=cell_float(row, COL_DMG_BONUS, 0.0),
+            )
+            if isinstance(row_data, _RowCharData) and row_data.char_id:
+                char.char_id = row_data.char_id
+                warnings.append(f"{name}：真实数据未就绪，使用预设技能")
             characters.append(char)
 
         enemy_name = self.enemy_name_edit.toPlainText().strip() or "怪物"
@@ -796,14 +1358,17 @@ class BattleSimulatorWindow(QMainWindow):
             level=enemy_level,
         )
 
-        return characters, [enemy], self.sp_spin.value(), self.turns_spin.value(), self.action_combo.currentIndex()
+        return (
+            characters, [enemy], self.sp_spin.value(), self.turns_spin.value(),
+            self.action_combo.currentIndex(), warnings,
+        )
 
     # ── 交互模拟 ─────────────────────────────────────
 
     def _start_interactive(self) -> None:
         """初始化交互模拟。"""
         try:
-            chars, enemies, initial_sp, max_av, _ = self._collect_config()
+            chars, enemies, initial_sp, max_av, _, warnings = self._collect_config()
         except Exception as e:
             QMessageBox.warning(self, "配置错误", f"读取配置失败: {e}")
             return
@@ -811,6 +1376,8 @@ class BattleSimulatorWindow(QMainWindow):
         if not chars:
             QMessageBox.warning(self, "配置错误", "至少需要一个角色")
             return
+        if warnings:
+            QMessageBox.information(self, "提示", "\n".join(warnings))
 
         self.characters = chars
         self.enemies = enemies
@@ -1183,7 +1750,7 @@ class BattleSimulatorWindow(QMainWindow):
     def _run_simulation(self) -> None:
         """运行战斗模拟并展示结果。"""
         try:
-            chars, enemies, initial_sp, max_av, action_mode = self._collect_config()
+            chars, enemies, initial_sp, max_av, action_mode, warnings = self._collect_config()
         except Exception as e:
             QMessageBox.warning(self, "配置错误", f"读取配置失败: {e}")
             return
@@ -1191,6 +1758,8 @@ class BattleSimulatorWindow(QMainWindow):
         if not chars:
             QMessageBox.warning(self, "配置错误", "至少需要一个角色")
             return
+        if warnings:
+            QMessageBox.information(self, "提示", "\n".join(warnings))
 
         self.characters = chars
         self.enemies = enemies
@@ -1373,7 +1942,7 @@ class BattleSimulatorWindow(QMainWindow):
             self.char_summary_table.setItem(i, 1, QTableWidgetItem(path_zh))
             self.char_summary_table.setItem(i, 2, QTableWidgetItem(elem_zh))
             self.char_summary_table.setItem(i, 3, QTableWidgetItem(f"{stats.atk:.0f}"))
-            self.char_summary_table.setItem(i, 4, QTableWidgetItem(f"{stats.spd:.0f}"))
+            self.char_summary_table.setItem(i, 4, QTableWidgetItem(f"{stats.spd:.1f}"))
             self.char_summary_table.setItem(i, 5, QTableWidgetItem(
                 f"{stats.crit_rate*100:.1f}% / {stats.crit_dmg*100:.1f}%"
             ))
@@ -1402,6 +1971,18 @@ class BattleSimulatorWindow(QMainWindow):
             value_label = layout.itemAt(1).widget()
             if isinstance(value_label, QLabel):
                 value_label.setText(value)
+
+    # ── 清理 ────────────────────────────────────────────
+
+    def closeEvent(self, event) -> None:
+        """窗口关闭：终止仍在运行的详情/光锥加载线程。"""
+        threads = dict(getattr(self, "_detail_threads", {}))
+        threads.update(getattr(self, "_lc_threads", {}))
+        for thread in threads.values():
+            if thread.isRunning():
+                thread.terminate()
+                thread.wait(1000)
+        super().closeEvent(event)
 
 
 # ── 入口 ──────────────────────────────────────────────────

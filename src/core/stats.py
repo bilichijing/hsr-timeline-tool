@@ -11,9 +11,11 @@
 - def_pct / def_flat     防御百分比 / 固定值
 - spd_pct / spd_flat     速度百分比 / 固定值
 - crit_rate / crit_dmg   暴击率 / 暴击伤害
-- dmg_bonus              伤害加成（属性增伤、通用增伤）
+- dmg_bonus              伤害加成（属性增伤、通用增伤；暂不区分属性，见字段 TODO）
 - break_effect           击破特攻
 - effect_hit / effect_res 效果命中 / 效果抵抗
+- energy_regen           能量恢复效率（回能乘区）
+- outgoing_heal          治疗量加成（待治疗模型接入）
 
 欢愉伤害专属属性（新版本）：
 - elation_dmg            欢愉度（欢愉伤害专属增伤）
@@ -43,6 +45,8 @@ class BaseStats:
     break_effect: float = 0.0
     effect_hit: float = 0.0
     effect_res: float = 0.0
+    energy_regen: float = 0.0     # 能量恢复效率（小数，如 0.1944 = +19.44%）
+    outgoing_heal: float = 0.0    # 治疗量加成（小数；模拟器暂无治疗模型）
     energy_max: float = 100.0     # 能量上限
     aggro: float = 100.0          # 仇恨值
 
@@ -69,9 +73,13 @@ class StatBonus:
     crit_rate: float = 0.0
     crit_dmg: float = 0.0
     dmg_bonus: float = 0.0          # 属性增伤、通用增伤
+    # TODO: dmg_bonus 暂为单值不区分属性。UI 只配置角色自身属性增伤一项，
+    #       且伤害路径 element 恒等于角色属性，单值足够；引入跨属性增伤时再 dict 化。
     break_effect: float = 0.0
     effect_hit: float = 0.0
     effect_res: float = 0.0
+    energy_regen: float = 0.0       # 能量恢复效率（小数）
+    outgoing_heal: float = 0.0      # 治疗量加成（小数；模拟器暂无治疗模型）
 
     # 固定值加成
     hp_flat: float = 0.0
@@ -124,6 +132,8 @@ class FinalStats:
     laugh_bonus: float
     laugh_point: float
     good_joke: float
+    energy_regen: float = 0.0      # 能量恢复效率（小数；带默认，避免破坏全关键字构造）
+    outgoing_heal: float = 0.0     # 治疗量加成（小数；模拟器暂无治疗模型）
 
 
 @dataclass
@@ -156,6 +166,8 @@ class StatCalculator:
             break_effect=b.break_effect + s.break_effect,
             effect_hit=b.effect_hit + s.effect_hit,
             effect_res=b.effect_res + s.effect_res,
+            energy_regen=b.energy_regen + s.energy_regen,
+            outgoing_heal=b.outgoing_heal + s.outgoing_heal,
             energy_max=b.energy_max,
             aggro=b.aggro,
             elation_dmg=b.elation_dmg + s.elation_dmg,

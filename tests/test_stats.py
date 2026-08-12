@@ -67,3 +67,32 @@ class TestStatCalculator:
         final = compute_final_stats(base, bonus)
         assert final.crit_rate == pytest.approx(0.13)  # 5% + 8%
         assert final.crit_dmg == pytest.approx(1.0)    # 50% + 50%
+
+
+# ── 能量恢复效率 / 治疗量加成 ──────────────────────────────
+
+
+class TestEnergyRegenAndHeal:
+    def test_final_stats_chain(self):
+        """BaseStats + StatBonus → FinalStats 相加正确。"""
+        base = BaseStats(energy_regen=0.1, outgoing_heal=0.05)
+        bonus = StatBonus(energy_regen=0.2, outgoing_heal=0.1)
+        final = compute_final_stats(base, bonus)
+        assert final.energy_regen == pytest.approx(0.3)
+        assert final.outgoing_heal == pytest.approx(0.15)
+
+    def test_add_and_scale_include_new_fields(self):
+        """StatBonus.add / scale 覆盖新字段。"""
+        b1 = StatBonus(energy_regen=0.1, outgoing_heal=0.2)
+        b2 = StatBonus(energy_regen=0.05)
+        total = b1.add(b2)
+        assert total.energy_regen == pytest.approx(0.15)
+        assert total.outgoing_heal == pytest.approx(0.2)
+        scaled = b1.scale(2.0)
+        assert scaled.energy_regen == pytest.approx(0.2)
+        assert scaled.outgoing_heal == pytest.approx(0.4)
+
+    def test_defaults_zero(self):
+        final = compute_final_stats(BaseStats(), StatBonus())
+        assert final.energy_regen == 0.0
+        assert final.outgoing_heal == 0.0

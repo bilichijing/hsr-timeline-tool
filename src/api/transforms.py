@@ -267,6 +267,33 @@ def transform_lightcone_detail(raw: dict, lc_id: str) -> LightconeInfo:
     )
 
 
+def pick_lightcone_stats80(info: LightconeInfo) -> dict:
+    """光锥详情 → 80 级 stats 行（promotion==6 优先，缺省取最大 promotion）。
+
+    返回 {"base_hp", "base_hp_add", "base_attack", "base_attack_add",
+          "base_defence", "base_defence_add"}。
+    """
+    rows = info.stats
+    if not rows:
+        return {}
+    pick = None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("promotion") == 6:
+            pick = row
+            break
+        if pick is None or row.get("promotion", 0) > pick.get("promotion", 0):
+            pick = row
+    if not pick:
+        return {}
+    return {
+        k: pick.get(k, 0)
+        for k in ("base_hp", "base_hp_add", "base_attack", "base_attack_add",
+                  "base_defence", "base_defence_add")
+    }
+
+
 def transform_relicset_detail(raw: dict, set_id: str) -> RelicSetInfo:
     """遗器套装详情提纯。"""
     parts_raw = raw.get("parts", {})

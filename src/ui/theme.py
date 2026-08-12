@@ -196,6 +196,12 @@ QComboBox::down-arrow {{
     border-top: 5px solid {Colors.TEXT_SECONDARY};
     margin-right: 6px;
 }}
+QSpinBox::up-button,
+QSpinBox::down-button {{
+    width: 0px;
+    border: none;
+    background: transparent;
+}}
 QComboBox QAbstractItemView {{
     background-color: {Colors.BG_CARD};
     color: {Colors.TEXT_PRIMARY};
