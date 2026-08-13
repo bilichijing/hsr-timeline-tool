@@ -200,10 +200,14 @@ def parse_skill(raw: dict[str, Any], level: int = 1) -> Skill:
 
     # SP 消耗/回复：新版用 bp_need / bp_add，旧版用 sp_cost
     # （真实数据中 bp_need/bp_add 可能为 None，or 0 防御）
+    # bp_need=-1 语义：普攻 = 回复（数量 bp_add）；其余类型 = 不消耗
+    # （如千冶战技"不消耗战技点"、终结技/天赋的 -1）
     sp_cost = int(raw.get("bp_need", raw.get("sp_cost", 0)) or 0)
     bp_add = int(raw.get("bp_add", 0) or 0)
     if skill_type == SkillType.NORMAL:
         sp_cost = -(bp_add or 1)  # 普攻回复 SP
+    elif sp_cost < 0:
+        sp_cost = 0  # 非普攻的 -1 表示不消耗（不回复）
     elif skill_type == SkillType.SKILL and sp_cost == 0:
         sp_cost = 1
 

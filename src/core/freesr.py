@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .character_factory import MAX_LEVEL, convert_stats80, extract_trace_bonuses
+from .character_factory import GROWTH_STEPS, convert_stats80, extract_trace_bonuses
 from .skill import SkillType, clamp_skill_level
 from .stats import BaseStats, FinalStats, StatBonus, StatCalculator
 
@@ -307,12 +307,12 @@ def parse_freesr(data: dict) -> FreesrProfile:
 def lightcone_base_stats(stats80_row: dict) -> BaseStats:
     """光锥 stats 行（promotion=6 的 80 级行）→ 基础值增量。
 
-    公式与角色一致：base + add×80；光锥只含 HP/ATK/DEF。
+    公式与角色一致：base + add×79（成长 ×(等级-1)）；光锥只含 HP/ATK/DEF。
     """
     return BaseStats(
-        hp_base=float(stats80_row.get("base_hp", 0)) + float(stats80_row.get("base_hp_add", 0)) * MAX_LEVEL,
-        atk_base=float(stats80_row.get("base_attack", 0)) + float(stats80_row.get("base_attack_add", 0)) * MAX_LEVEL,
-        def_base=float(stats80_row.get("base_defence", 0)) + float(stats80_row.get("base_defence_add", 0)) * MAX_LEVEL,
+        hp_base=float(stats80_row.get("base_hp", 0)) + float(stats80_row.get("base_hp_add", 0)) * GROWTH_STEPS,
+        atk_base=float(stats80_row.get("base_attack", 0)) + float(stats80_row.get("base_attack_add", 0)) * GROWTH_STEPS,
+        def_base=float(stats80_row.get("base_defence", 0)) + float(stats80_row.get("base_defence_add", 0)) * GROWTH_STEPS,
     )
 
 

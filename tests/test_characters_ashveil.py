@@ -60,6 +60,18 @@ def _ashveil_skills_raw():
                 for i in range(10)
             },
         },
+        "150407": {
+            "id": 150407, "name": "吃吧，可憎的手", "type": "Maze", "type_name": "秘技",
+            "level": {
+                str(i + 1): {"param_list": [10.0, 1.0, 1.0]}
+                for i in range(10)
+            },
+        },
+        # 迷宫普攻（同为 Technique 类型但无参数，真实数据存在，秘技查找必须避开它）
+        "150406": {
+            "id": 150406, "name": "利爪，授以礼仪", "type": "MazeNormal", "type_name": "",
+            "level": {"1": {"param_list": []}},
+        },
     }
 
 
@@ -171,13 +183,29 @@ def _allied_attack(sim: BattleSimulator, unit_id: str, target_id: str) -> None:
 
 class TestBattleStart:
     def test_charge_initialized_from_talent(self):
+        """初始充能 = 天赋 #1(2) + 秘技进战充能 #3(1) = 3。"""
         sim = _make_battle()
         module = sim.char_modules["ashveil"]
-        assert module.charge == 2  # 天赋 #1
+        assert module.charge == 3
 
-    def test_no_bait_no_def_reduce(self):
+    def test_first_enemy_becomes_bait(self):
+        """战斗开始：首个敌人直接成为饲饵 → 敌方全体减防 0.4。"""
         sim = _make_battle()
-        assert all(e.def_reduce == 0 for e in sim.enemies)
+        module = sim.char_modules["ashveil"]
+        assert module.bait_unit_id == "enemy_a"
+        assert all(e.def_reduce == pytest.approx(0.4) for e in sim.enemies)
+
+    def test_technique_battle_start_damage(self):
+        """秘技进战：对敌方全体造成攻击力 100% 雷伤（技能类型=秘技）。"""
+        sim = _make_battle()
+        techniques = [l for l in sim.logs if l.action_type == "technique"]
+        assert len(techniques) == 2  # 敌方全体（2 个敌人）
+        for log in techniques:
+            assert log.actor_id == "ashveil"
+            assert len(log.damage_records) == 1
+            assert log.damage_records[0].skill_type.value == "Technique"
+            # 1000 × 1.0 × 未击破 0.9 × 防御系数（减防 0.4 已生效）
+            assert log.total_damage == pytest.approx(1000 * 1.0 * 0.9 * 100 / 160)
 
     def test_module_mounted_by_char_id(self):
         sim = _make_battle()
@@ -257,11 +285,11 @@ class TestTalentTrigger:
         sim = _make_battle()
         module = sim.char_modules["ashveil"]
         self._setup_bait(sim)
-        assert module.charge == 2
+        assert module.charge == 3  # 初始 2 + 秘技进战 1
 
         _allied_attack(sim, "mate", "enemy_a")
 
-        assert module.charge == 1  # 消耗 1 点充能
+        assert module.charge == 2  # 消耗 1 点充能
         assert module.greed == 2   # 获得 2 层婪酣
 
     def test_energy_recovered_on_bait_hit(self):
@@ -273,7 +301,8 @@ class TestTalentTrigger:
 
         _allied_attack(sim, "mate", "enemy_a")
 
-        assert ash.energy - energy_before == 8  # 天赋 #7
+        # 天赋 #7 固定回能 8 + 追加攻击回能 5（天赋 sp_base）= 13
+        assert ash.energy - energy_before == pytest.approx(13.0)
 
     def test_attack_on_non_bait_does_not_trigger(self):
         sim = _make_battle()
@@ -283,15 +312,18 @@ class TestTalentTrigger:
         assert all(l.action_type != "follow_up" for l in sim.logs)
 
     def test_own_attack_on_bait_does_not_trigger(self):
-        """防自激：不死途自己的攻击（含追打自身）不触发天赋。"""
+        """防自激：不死途自己的攻击（含追打自身）不触发天赋（无 8 点固定回能）。"""
         sim = _make_battle()
         module = sim.char_modules["ashveil"]
         self._setup_bait(sim)
         charge_before = module.charge
+        ash = sim.characters[0]
+        energy_before = ash.energy
 
         _allied_attack(sim, "ashveil", "enemy_a")
 
         assert module.charge == charge_before
+        assert ash.energy == energy_before  # 天赋 #7 固定回能不触发
         follow_ups = [l for l in sim.logs if l.action_type == "follow_up"]
         assert len(follow_ups) == 0
 
@@ -354,18 +386,19 @@ class TestUltraChain:
         # 终结技首段（L10 倍率 4.0）：饲饵先标记 → 敌方减防 0.4 已生效
         # 伤害 = 1000 × 4.0 × 未击破减伤 0.9 × 防御系数（80级 vs 80级 + 减防0.4）
         assert log.damages[0] == pytest.approx(1000 * 4.0 * 0.9 * 100 / 160)
-        assert ash.energy == 0  # 耗能 150
+        # 耗能 150 后：终结技回能 5（sp_base）+ 强化追打回能 5（天赋 sp_base）= 10
+        assert ash.energy == pytest.approx(10.0)
 
     def test_ultra_gives_charge_capped(self):
         sim = _make_battle()
         module = sim.char_modules["ashveil"]
         ash = sim.characters[0]
         ash.energy = 150
-        assert module.charge == 2
+        assert module.charge == 3  # 初始 2 + 秘技进战 1
 
         sim.execute_ultra(0)
 
-        # 获得 #2=3 点，钳制到上限 3
+        # 获得 #2=3 点，钳制到上限 3（已满则不变）
         assert module.charge == 3
 
     def test_ultra_free_strike_does_not_consume_charge(self):
@@ -417,6 +450,20 @@ class TestUltraChain:
         assert len(follow_ups) == 1
         assert module.greed == 3
 
+    def test_ultra_greed_strikes_no_energy(self):
+        """婪酣额外攻击不提供追加攻击回能：仅终结技 5 + 免费强化追打 5 = 10。"""
+        sim = _make_battle()
+        module = self._prepare(sim, greed=8)  # 2 段额外攻击
+        ash = sim.characters[0]
+        ash.energy = 150
+
+        sim.execute_ultra(0)
+
+        follow_ups = [l for l in sim.logs if l.action_type == "follow_up"]
+        assert len(follow_ups) == 3  # 免费 + 2 段婪酣
+        # 婪酣段不回能 → 能量 = 150 - 150 + 5 + 5 = 10
+        assert ash.energy == pytest.approx(10.0)
+
     def test_ultra_chain_follow_up_double_dimension(self):
         sim = _make_battle()
         module = self._prepare(sim, greed=4)
@@ -440,3 +487,98 @@ class TestRegistry:
 
     def test_unknown_char_id_returns_none(self):
         assert get_module_cls("9999") is None
+
+
+# ── 固定回能不乘能量恢复效率 ───────────────────────────────
+
+
+class TestFixedEnergyRecover:
+    def test_talent_fixed_energy_ignores_energy_regen(self):
+        """天赋 #7 固定 8 点回能不受 energy_regen 影响（追加攻击 5 点正常吃乘区）。"""
+        sim = _make_battle()
+        module = sim.char_modules["ashveil"]
+        sim.step(PlayerAction(unit_id="ashveil", skill_type=SkillType.SKILL, target_id="enemy_a"))
+        ash = sim.characters[0]
+        ash.bonus_stats.energy_regen = 0.5
+        energy_before = ash.energy
+
+        _allied_attack(sim, "mate", "enemy_a")
+
+        # 固定 8（不乘 1.5）+ 追加攻击 5 × 1.5 = 8 + 7.5 = 15.5
+        assert ash.energy - energy_before == pytest.approx(15.5)
+
+
+# ── 手动推进与插队终结技的 AV 位置 ─────────────────────────
+
+
+class TestUltraInterruptTiming:
+    def _step_first_action(self, sim: BattleSimulator) -> None:
+        """首个行动者行动（setup 后已推进到第一个行动者）。"""
+        actor = sim.action_queue.next_actor()
+        sim.step(PlayerAction(
+            unit_id=actor.unit_id,
+            skill_type=SkillType.SKILL if actor.unit_id == "ashveil" else SkillType.NORMAL,
+            target_id="enemy_a",
+        ))
+
+    def test_action_does_not_advance_automatically(self):
+        """释放技能后不自动推进：total_av 停在行动者位置，需手动 advance_av。"""
+        sim = _make_battle()
+        av_before = sim.total_av  # setup 后已推进到第一个行动者
+        self._step_first_action(sim)
+        # 行动后未推进：total_av 不变
+        assert sim.total_av == pytest.approx(av_before)
+
+    def test_interrupt_after_action_stays_at_actor_position(self):
+        """行动后插队终结技：位置停在行动者位置（B 行动后 = 200）。"""
+        sim = _make_battle()
+        self._step_first_action(sim)
+        actor_pos = sim.total_av  # 行动者位置（未推进）
+        sim.characters[0].energy = 150
+
+        log = sim.execute_ultra(0)
+
+        assert log.total_av == pytest.approx(actor_pos)
+        assert sim.total_av == pytest.approx(actor_pos)
+
+    def test_advance_then_interrupt_at_new_position(self):
+        """推进后插队终结技：位置在下个行动者的行动位置（轮到 C = 250）。"""
+        sim = _make_battle()
+        self._step_first_action(sim)
+        advanced = sim.advance_av()
+        assert advanced > 0  # 推进到下个行动者
+        new_pos = sim.total_av
+        sim.characters[0].energy = 150
+
+        log = sim.execute_ultra(0)
+
+        assert log.total_av == pytest.approx(new_pos)
+
+    def test_advance_av_idempotent(self):
+        """重复推进不重复累加。"""
+        sim = _make_battle()
+        first = sim.advance_av()
+        assert sim.advance_av() == 0.0  # 已推进到当前行动者
+        assert sim.total_av == pytest.approx(first)
+
+    def test_advance_after_action_reaches_next_actor(self):
+        """行动后推进：total_av 到达下个行动者的位置。"""
+        sim = _make_battle()
+        self._step_first_action(sim)
+        actor = sim.action_queue.next_actor()
+        expected = sim.total_av + actor.current_av
+
+        sim.advance_av()
+
+        assert sim.total_av == pytest.approx(expected)
+        assert sim.pending_av_actor == actor.unit_id
+
+    def test_snapshot_restore_preserves_pending(self):
+        """快照/回溯保留推进标记。"""
+        sim = _make_battle()
+        snap_before = sim.snapshot()
+        sim.advance_av()
+        assert sim.pending_av_actor is not None
+        sim.restore(snap_before)
+        assert sim.pending_av_actor is None
+        assert sim.total_av == 0.0

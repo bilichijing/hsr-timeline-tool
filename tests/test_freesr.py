@@ -179,9 +179,9 @@ class TestPanel:
         row = {"base_hp": 100.0, "base_hp_add": 5.0, "base_attack": 50.0,
                "base_attack_add": 2.0, "base_defence": 30.0, "base_defence_add": 1.0}
         base = lightcone_base_stats(row)
-        assert base.hp_base == pytest.approx(100 + 5 * 80)
-        assert base.atk_base == pytest.approx(50 + 2 * 80)
-        assert base.def_base == pytest.approx(30 + 1 * 80)
+        assert base.hp_base == pytest.approx(100 + 5 * 79)
+        assert base.atk_base == pytest.approx(50 + 2 * 79)
+        assert base.def_base == pytest.approx(30 + 1 * 79)
 
     def test_compute_panel_with_lightcone(self):
         profile = parse_freesr(_load_freesr())
@@ -195,8 +195,8 @@ class TestPanel:
         lc_row = {"base_hp": 100.0, "base_hp_add": 5.0, "base_attack": 50.0,
                   "base_attack_add": 2.0, "base_defence": 30.0, "base_defence_add": 1.0}
         final = compute_panel(stats80, profile.relics["1504"], lc_row)
-        # 攻击 = (角色 781.44 + 光锥 210) × (1 + 攻击% 1.3824) + 固定 464.195
-        assert final.atk == pytest.approx((781.44 + 210) * (1 + 1.3824) + 464.195)
+        # 攻击 = (角色 776.16 + 光锥 208) × (1 + 攻击% 1.3824) + 固定 464.195
+        assert final.atk == pytest.approx((776.16 + 208) * (1 + 1.3824) + 464.195)
         # 速度 = 106 + 副词条 8.6（无速度主词条）
         assert final.spd == pytest.approx(106 + 8.6)
         # 暴击率 = 0.05 + 躯干暴击主 0.324 + 副词条 0.06156
@@ -212,7 +212,7 @@ class TestPanel:
             "critical_damage": 0.5, "base_aggro": 75.0,
         }
         final = compute_panel(stats80, profile.relics["1504"])
-        assert final.atk == pytest.approx(781.44 * (1 + 1.3824) + 464.195)
+        assert final.atk == pytest.approx(776.16 * (1 + 1.3824) + 464.195)
 
 
 # ── 初始能量 ───────────────────────────────────────────────

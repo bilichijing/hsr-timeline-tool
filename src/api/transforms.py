@@ -53,16 +53,25 @@ _PARAM_PLACEHOLDER_RE = re.compile(r"#(\d+)\[i\]")
 def interpolate_params(text: str, params: list[float]) -> str:
     """替换 #1[i] 等占位符为实际参数值。
 
-    示例：interpolate_params('攻击力提高#1[i]%', [0.5]) → '攻击力提高50%'
-    #1[i] 后面的 % 会被保留。
+    示例：
+        interpolate_params('攻击力提高#1[i]%', [0.5]) → '攻击力提高50%'
+        interpolate_params('每有#1[i]层【婪酣】', [1]) → '每有1层【婪酣】'
+
+    占位符后紧跟 % 的按百分比显示（0.5 → 50%），
+    否则按原值显示（层数/次数等，如 1.0 → 1）。
     """
     def replacer(m: re.Match) -> str:
         idx = int(m.group(1)) - 1  # #1 对应 params[0]
         if 0 <= idx < len(params):
             val = params[idx]
-            # 0.5 → 50, 0.123 → 12.3
-            pct = val * 100
-            return str(int(pct)) if pct == int(pct) else str(pct)
+            # 占位符后是否紧跟 %（决定百分比/原值显示）
+            after = text[m.end():m.end() + 1]
+            if after == "%":
+                # 0.5 → 50, 0.123 → 12.3
+                pct = val * 100
+                return str(int(pct)) if pct == int(pct) else str(pct)
+            # 层数/次数等原值显示（1.0 → 1）
+            return f"{val:g}"
         return m.group(0)
 
     return _PARAM_PLACEHOLDER_RE.sub(replacer, text)

@@ -3,9 +3,9 @@
 core 层不依赖 api 模块（api 的 pydantic 模型 / PySide6 均不在此导入），
 参数全部用基本类型 / dict，可独立测试。UI 层从 CharacterInfo 解包后调用。
 
-80 级面板公式（TODO 实测校准）：
-    最终值 = stats["6"].base + add × 80
-    不死途 1504 实测：ATK = 359.04 + 5.28×80 = 781.44，与游戏内面板吻合；
+80 级面板公式：
+    最终值 = stats["6"].base + add × (等级-1) = base + add × 79
+    不死途 1504：ATK = 359.04 + 5.28×79 = 776.16（用户实测校准）；
     速度/暴击率/暴击伤害不随等级成长，直接取 stats["6"] 值。
 
 能量上限（TODO 实测校准）：nanoka 详情无 energy_max 字段，
@@ -20,7 +20,8 @@ from .simulator import CharacterUnit
 from .skill import SkillType, parse_all_skills
 from .stats import BaseStats, StatBonus
 
-MAX_LEVEL = 80  # 满级等级（用于成长计算）
+MAX_LEVEL = 80  # 满级等级
+GROWTH_STEPS = MAX_LEVEL - 1  # 成长级数（属性 = 基础 + 每级成长 × (等级-1)）
 
 # 80 级突破等级键（nanoka stats 表的键为突破等级 0-6，"6" = 80 级）
 STATS_KEY_80 = "6"
@@ -82,13 +83,13 @@ def extract_trace_bonuses(skill_trees_raw: dict | None) -> StatBonus:
 def convert_stats80(stats_row: dict[str, float]) -> BaseStats:
     """nanoka 详情 stats["6"]（80 级突破行）→ 80 级 BaseStats。
 
-    公式：value = base + add × 80（速度/暴击/仇恨不成长直接取用）。
+    公式：value = base + add × 79（成长 ×(等级-1)；速度/暴击/仇恨不成长直接取用）。
     缺失字段默认 0。
     """
     return BaseStats(
-        hp_base=float(stats_row.get("hp_base", 0)) + float(stats_row.get("hp_add", 0)) * MAX_LEVEL,
-        atk_base=float(stats_row.get("attack_base", 0)) + float(stats_row.get("attack_add", 0)) * MAX_LEVEL,
-        def_base=float(stats_row.get("defence_base", 0)) + float(stats_row.get("defence_add", 0)) * MAX_LEVEL,
+        hp_base=float(stats_row.get("hp_base", 0)) + float(stats_row.get("hp_add", 0)) * GROWTH_STEPS,
+        atk_base=float(stats_row.get("attack_base", 0)) + float(stats_row.get("attack_add", 0)) * GROWTH_STEPS,
+        def_base=float(stats_row.get("defence_base", 0)) + float(stats_row.get("defence_add", 0)) * GROWTH_STEPS,
         spd_base=float(stats_row.get("speed_base", 0)),
         crit_rate=float(stats_row.get("critical_chance", 0.05)),
         crit_dmg=float(stats_row.get("critical_damage", 0.50)),
@@ -154,4 +155,5 @@ def build_character_unit(
         elation_skill_level=elation_skill_level,
         char_id=char_id,
         initial_energy=initial_energy,
+        skill_trees_raw=skill_trees_raw or {},
     )

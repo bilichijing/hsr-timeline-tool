@@ -52,11 +52,11 @@ def _skills_raw() -> dict:
 
 class TestConvertStats80:
     def test_ashveil_real_stats(self):
-        """不死途实测：ATK = 359.04 + 5.28×80 = 781.44。"""
+        """不死途实测：ATK = 359.04 + 5.28×79 = 776.16（成长 ×(等级-1)）。"""
         base = convert_stats80(ASHVEIL_STATS80)
-        assert base.atk_base == pytest.approx(781.44)
-        assert base.hp_base == pytest.approx(394.944 + 5.808 * 80)  # 859.584
-        assert base.def_base == pytest.approx(179.52 + 2.64 * 80)
+        assert base.atk_base == pytest.approx(359.04 + 5.28 * 79)
+        assert base.hp_base == pytest.approx(394.944 + 5.808 * 79)
+        assert base.def_base == pytest.approx(179.52 + 2.64 * 79)
         assert base.spd_base == 106.0  # 速度不成长
         assert base.crit_rate == 0.05
         assert base.crit_dmg == 0.5

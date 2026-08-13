@@ -8,12 +8,13 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
     QFont,
     QLinearGradient,
+    QMouseEvent,
     QPainter,
     QPainterPath,
     QPen,
@@ -31,7 +32,11 @@ class EnergyOrbWidget(QWidget):
         orb = EnergyOrbWidget(name="角色A", max_energy=120)
         orb.set_energy(60)  # 设置当前能量
         orb.set_avatar(pixmap)  # 设置角色头像
+
+    点击图标发射 clicked（查看角色 buff 等）。
     """
+
+    clicked = Signal()
 
     def __init__(
         self,
@@ -43,8 +48,13 @@ class EnergyOrbWidget(QWidget):
         self._name = name
         self._max_energy = max_energy
         self._energy = 0.0
-        self._is_active = False  # 是否当前行动者
+        self._is_active = False  # 是否当前行动者（实线高亮）
+        self._is_pending = False  # 是否即将行动（虚线高亮，待推进阶段的下个行动者）
         self._avatar: QPixmap | None = None  # 角色头像
+        # 充能指示：圆点模式（如不死途追击充能）/ 文字模式（如千冶天赋充能 "6/9"）
+        self._charge: float | None = None
+        self._max_charge: int = 3
+        self._charge_text: tuple[int, int] | None = None  # (当前, 上限)，None 不显示
         self.setMinimumSize(130, 100)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
 
@@ -61,8 +71,17 @@ class EnergyOrbWidget(QWidget):
         self.update()
 
     def set_active(self, active: bool) -> None:
-        """标记为当前行动者（高亮外圈）。"""
+        """标记为当前行动者（实线高亮外圈）。"""
         self._is_active = active
+        if active:
+            self._is_pending = False  # 互斥：当前行动者不再是待命
+        self.update()
+
+    def set_pending(self, pending: bool) -> None:
+        """标记为待推进的下个行动者（虚线高亮外圈）。"""
+        self._is_pending = pending
+        if pending:
+            self._is_active = False  # 互斥：待命状态下不实线高亮
         self.update()
 
     def set_avatar(self, pixmap: QPixmap | None) -> None:
@@ -70,8 +89,30 @@ class EnergyOrbWidget(QWidget):
         self._avatar = pixmap
         self.update()
 
+    def set_charge(self, charge: float | None, max_charge: int = 3) -> None:
+        """设置追击充能指示（圆点模式，None 不显示；如不死途剩余充能）。"""
+        self._charge = charge
+        self._charge_text = None  # 与文字模式互斥
+        self._max_charge = max(1, max_charge)
+        self.update()
+
+    def set_charge_text(self, current: int | None, max_charge: int = 9) -> None:
+        """设置充能文字指示（文字模式，None 不显示；如千冶天赋充能 "6/9" 红色）。"""
+        if current is None:
+            self._charge_text = None
+        else:
+            self._charge_text = (int(current), max(1, int(max_charge)))
+        self._charge = None  # 与圆点模式互斥
+        self.update()
+
     def is_full(self) -> bool:
         return self._energy >= self._max_energy
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        """左键点击发射 clicked 信号（查看角色 buff）。"""
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
 
     def paintEvent(self, event) -> None:
         """绘制圆形能量图标（左侧头像 + 右侧能量圆）。"""
@@ -142,11 +183,26 @@ class EnergyOrbWidget(QWidget):
             painter.setPen(QColor(Colors.TEXT_DISABLED))
             painter.drawText(avatar_rect, Qt.AlignCenter, "?")
 
-        # 头像边框
-        avatar_border = QColor(Colors.CYAN) if self._is_active else QColor(Colors.BORDER)
+        # 头像边框：当前行动者实线青色；待推进下个行动者虚线青色；否则普通边框
+        if self._is_active:
+            avatar_border = QColor(Colors.CYAN)
+            pen = QPen(avatar_border, 2)
+        elif self._is_pending:
+            avatar_border = QColor(Colors.CYAN)
+            pen = QPen(avatar_border, 2)
+            pen.setStyle(Qt.DashLine)
+        else:
+            avatar_border = QColor(Colors.BORDER)
+            pen = QPen(avatar_border, 1)
         painter.setBrush(Qt.NoBrush)
-        painter.setPen(QPen(avatar_border, 2 if self._is_active else 1))
+        painter.setPen(pen)
         painter.drawEllipse(avatar_rect)
+
+        # 充能指示（覆盖在头像底部上方，黑色渐变背景）：圆点 / 文字两种模式
+        if self._charge is not None:
+            self._draw_charge_badge(painter, avatar_rect)
+        elif self._charge_text is not None:
+            self._draw_charge_text_badge(painter, avatar_rect)
 
         # 3. 绘制圆形背景（深色底）
         painter.setBrush(QBrush(QColor(Colors.BG_DEEPEST)))
@@ -194,6 +250,64 @@ class EnergyOrbWidget(QWidget):
         painter.setPen(QColor(Colors.TEXT_SECONDARY))
         name_rect = QRectF(avatar_x - 4, h - name_h, avatar_size + gap + circle_size + 8, name_h)
         painter.drawText(name_rect, Qt.AlignCenter, self._name)
+
+    def _draw_charge_badge(self, painter: QPainter, avatar_rect: QRectF) -> None:
+        """绘制追击充能徽章：黑色渐变背景 + 紫色圆点（空心/实心）。"""
+        badge_h = 16
+        badge_rect = QRectF(
+            avatar_rect.left() + 1,
+            avatar_rect.bottom() - badge_h + 2,
+            avatar_rect.width() - 2,
+            badge_h,
+        )
+        self._draw_badge_background(painter, badge_rect)
+
+        # 充能圆点：从左到右，剩余次数内实心、其余空心
+        purple = QColor(168, 130, 212)
+        dot_r = 3.0
+        filled = int(round(self._charge or 0))
+        filled = min(max(filled, 0), self._max_charge)
+        spacing = badge_rect.width() / (self._max_charge + 1)
+        for i in range(self._max_charge):
+            cx = badge_rect.left() + spacing * (i + 1)
+            cy = badge_rect.center().y()
+            if i < filled:
+                painter.setBrush(QBrush(purple))
+                painter.setPen(Qt.NoPen)
+            else:
+                painter.setBrush(Qt.NoBrush)
+                painter.setPen(QPen(purple, 1))
+            painter.drawEllipse(QPointF(cx, cy), dot_r, dot_r)
+
+    def _draw_charge_text_badge(self, painter: QPainter, avatar_rect: QRectF) -> None:
+        """绘制充能文字徽章：黑色渐变背景 + 红色文字（如千冶天赋充能 "6/9"）。"""
+        badge_h = 16
+        badge_rect = QRectF(
+            avatar_rect.left() + 1,
+            avatar_rect.bottom() - badge_h + 2,
+            avatar_rect.width() - 2,
+            badge_h,
+        )
+        self._draw_badge_background(painter, badge_rect)
+
+        current, maximum = self._charge_text
+        painter.setPen(QColor(255, 90, 90))  # 红色字体
+        font = QFont("Microsoft YaHei UI", 8, QFont.Bold)
+        painter.setFont(font)
+        painter.drawText(
+            badge_rect.adjusted(1, 0, -1, 0),
+            Qt.AlignCenter,
+            f"{current}/{maximum}",
+        )
+
+    def _draw_badge_background(self, painter: QPainter, badge_rect: QRectF) -> None:
+        """黑色渐变背景（底部深黑、顶部半透明），覆盖在头像上方。"""
+        gradient = QLinearGradient(badge_rect.topLeft(), badge_rect.bottomLeft())
+        gradient.setColorAt(0.0, QColor(0, 0, 0, 90))
+        gradient.setColorAt(1.0, QColor(0, 0, 0, 235))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(gradient))
+        painter.drawRoundedRect(badge_rect, 3, 3)
 
     def _circle_fill_path(self, rect: QRectF, fill_ratio: float) -> QPainterPath:
         """生成圆形填充裁剪路径：圆形与底部矩形的交集。

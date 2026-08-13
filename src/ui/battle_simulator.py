@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QThread, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QFont, QPalette
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -45,13 +47,20 @@ from PySide6.QtWidgets import (
 from src.api.client import fetch_character_detail, fetch_lightcone_detail, run_in_loop
 from src.api.consts import ELEMENT_MAP, PATH_MAP
 from src.api.transforms import (
+    clean_text,
     pick_lightcone_stats80,
     transform_character_detail,
     transform_lightcone_detail,
 )
-from src.core.character_factory import build_character_unit
+from src.core.character_factory import (
+    GROWTH_STEPS,
+    build_character_unit,
+    convert_stats80,
+    extract_trace_bonuses,
+)
 from src.core.damage import DamageType
-from src.core.freesr import compute_panel, parse_freesr
+from src.core.freesr import compute_panel, lightcone_base_stats, parse_freesr
+from src.core.stats import StatCalculator
 from src.core.simulator import (
     BattleEndReason,
     BattleSimulator,
@@ -85,17 +94,23 @@ ACTION_NAMES_ZH: dict[str, str] = {
     "monster": "怪物行动",
     "aha_moment": "阿哈时刻",
     "follow_up": "追加攻击",
+    "technique": "秘技",
 }
+
+
+# 队伍配置缓存文件（cache 目录已 gitignore）
+TEAM_CONFIG_PATH = Path("./cache/team_config.json")
 
 
 # ── 队伍表格行数据与列号 ──────────────────────────────────
 
-# 队伍表格列号（12 项属性 + 名称/命途/属性）
-COL_NAME, COL_PATH, COL_ELEMENT = 0, 1, 2
-COL_HP, COL_ATK, COL_DEF, COL_SPD = 3, 4, 5, 6
-COL_CRIT_RATE, COL_CRIT_DMG, COL_BREAK_EFFECT, COL_EFFECT_RES = 7, 8, 9, 10
-COL_ENERGY_REGEN, COL_EFFECT_HIT, COL_OUTGOING_HEAL, COL_DMG_BONUS = 11, 12, 13, 14
-COL_COUNT = 15
+# 队伍表格列号（名称/光锥 + 12 项属性；命途/属性仅在侧栏队伍概览显示）
+COL_NAME = 0
+COL_LIGHTCONE = 1
+COL_HP, COL_ATK, COL_DEF, COL_SPD = 2, 3, 4, 5
+COL_CRIT_RATE, COL_CRIT_DMG, COL_BREAK_EFFECT, COL_EFFECT_RES = 6, 7, 8, 9
+COL_ENERGY_REGEN, COL_EFFECT_HIT, COL_OUTGOING_HEAL, COL_DMG_BONUS = 10, 11, 12, 13
+COL_COUNT = 14
 
 # 百分比列（数值为小数，0.05 = 5%）
 PERCENT_COLUMNS = {
@@ -104,7 +119,7 @@ PERCENT_COLUMNS = {
 }
 
 TABLE_HEADERS = [
-    "名称", "命途", "属性",
+    "名称", "光锥",
     "生命值", "攻击力", "防御力", "速度",
     "暴击率", "暴击伤害", "击破特攻", "效果抵抗",
     "能量恢复效率", "效果命中", "治疗量加成", "属性增伤",
@@ -129,6 +144,8 @@ class _RowCharData:
     rank: int = 0            # 星魂（freesr data.rank）
     relics_raw: list = field(default_factory=list)     # freesr 原始遗器列表
     lightcone_raw: list = field(default_factory=list)  # freesr 原始光锥列表
+    lightcone_stats80: dict = field(default_factory=dict)  # 光锥 80 级基础（面板基础值显示用）
+    lightcone_name: str = ""    # 携带光锥名（freesr 导入后填写）
 
 
 # ── 角色详情后台加载线程 ──────────────────────────────────
@@ -178,7 +195,7 @@ class _CharacterDetailWorker(QObject):
 class _FreesrLightconeWorker(QObject):
     """后台加载全部光锥详情（单个一次性线程，diskcache 命中秒回）。"""
 
-    loaded = Signal(object, object)   # ({item_id: stats80 行}, [失败 item_id 列表])
+    loaded = Signal(object, object)   # ({item_id: {"stats80":..., "name":...}}, [失败 item_id 列表])
 
     def __init__(self, item_ids: list[int]) -> None:
         super().__init__()
@@ -200,7 +217,10 @@ class _FreesrLightconeWorker(QObject):
             try:
                 raw = await fetch_lightcone_detail(item_id)
                 info = transform_lightcone_detail(raw, str(item_id))
-                rows[item_id] = pick_lightcone_stats80(info)
+                rows[item_id] = {
+                    "stats80": pick_lightcone_stats80(info),
+                    "name": info.name,
+                }
             except Exception:
                 failed.append(item_id)
         return rows, failed
@@ -341,6 +361,10 @@ class BattleSimulatorWindow(QMainWindow):
         self.setWindowTitle("星穹铁道排轴工具 · 战斗模拟器")
         self.resize(1400, 900)
 
+        # 应用级事件过滤器：交互模式下按键无论焦点在哪个控件都被拦截处理
+        # （否则焦点在日志表格等控件时 Q/E/空格 会被控件消费）
+        QApplication.instance().installEventFilter(self)
+
         self.characters: list[CharacterUnit] = []
         self.enemies: list[EnemyState] = []
         self._last_result: BattleResult | None = None
@@ -354,6 +378,8 @@ class BattleSimulatorWindow(QMainWindow):
 
         self._init_ui()
         self._load_default_config()
+        # 队伍配置缓存：有则自动恢复上次关闭时的队伍
+        self._load_team_config()
 
     # ── UI 初始化 ─────────────────────────────────────
 
@@ -391,7 +417,7 @@ class BattleSimulatorWindow(QMainWindow):
         )
         layout.addWidget(title)
 
-        subtitle = QLabel("战斗模拟器 · 阶段 2 验收")
+        subtitle = QLabel("战斗模拟器")
         subtitle.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: 11px;")
         layout.addWidget(subtitle)
 
@@ -492,14 +518,14 @@ class BattleSimulatorWindow(QMainWindow):
         self.team_table = QTableWidget(4, COL_COUNT)
         self.team_table.setHorizontalHeaderLabels(TABLE_HEADERS)
         header = self.team_table.horizontalHeader()
-        # 名称/命途/属性可伸缩，12 项属性固定宽度，横向滚动
-        for col in range(3):
-            header.setSectionResizeMode(col, QHeaderView.Interactive)
-        for col in range(3, COL_COUNT):
+        # 名称/光锥列可伸缩，12 项属性固定宽度，横向滚动
+        header.setSectionResizeMode(COL_NAME, QHeaderView.Interactive)
+        header.setSectionResizeMode(COL_LIGHTCONE, QHeaderView.Interactive)
+        for col in range(2, COL_COUNT):
             header.setSectionResizeMode(col, QHeaderView.Fixed)
         header.setDefaultSectionSize(90)
         # 表头 tooltip：百分比列注明小数格式；属性增伤注明适用角色自身属性
-        for col in range(3, COL_COUNT):
+        for col in range(2, COL_COUNT):
             tip = TABLE_HEADERS[col]
             if col in PERCENT_COLUMNS:
                 tip += "（小数，0.05 = 5%）"
@@ -652,7 +678,7 @@ class BattleSimulatorWindow(QMainWindow):
         layout.addWidget(energy_group)
 
         # 操作按钮区
-        ops_group = QGroupBox("操作  ·  键盘: E=战技  Q=普攻  1/2/3/4=终结技插队  空格=推进怪物/阿哈")
+        ops_group = QGroupBox("操作  ·  键盘: E=战技  Q=普攻  1/2/3/4=终结技插队  空格=推进行动")
         ops_layout = QHBoxLayout(ops_group)
         ops_layout.setSpacing(6)
 
@@ -696,6 +722,12 @@ class BattleSimulatorWindow(QMainWindow):
         self.btn_rewind.clicked.connect(self._interactive_rewind_to_selected)
         ops_layout.addWidget(self.btn_rewind)
 
+        # 交互区按钮禁用键盘焦点：空格/回车始终由主窗口 keyPressEvent 处理，
+        # 避免按钮获得焦点时空格触发"重新开始"等按钮点击
+        for btn in (self.btn_start_interactive, self.btn_advance, self.btn_normal,
+                    self.btn_skill, self.btn_rewind, *self.btn_ultras):
+            btn.setFocusPolicy(Qt.NoFocus)
+
         layout.addWidget(ops_group)
 
         # 日志表格
@@ -735,7 +767,8 @@ class BattleSimulatorWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         hint = QLabel("横轴为累计总行动值，悬停行动点可查看详情")
-        hint.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: 11px;")
+        hint.setAlignment(Qt.AlignCenter)
+        hint.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: 20px;")
         layout.addWidget(hint)
 
         self.gantt_widget = TimelineGanttWidget()
@@ -874,17 +907,19 @@ class BattleSimulatorWindow(QMainWindow):
 
         for row in range(self.team_table.rowCount()):
             name_item = self.team_table.item(row, 0)
-            path_item = self.team_table.item(row, 1)
-            elem_item = self.team_table.item(row, 2)
             if not name_item or not name_item.text().strip():
                 continue
             name = name_item.text().strip()
-            path_zh = path_item.text().strip() if path_item else ""
-            elem_zh = elem_item.text().strip() if elem_item else ""
+            # 命途/属性从行数据读取（表格不显示这两列）
+            row_data = name_item.data(Qt.UserRole)
+            if isinstance(row_data, _RowCharData) and row_data.path:
+                path_en, elem_en = row_data.path, row_data.element
+                path_zh = PATH_MAP.get(path_en, path_en)
+                elem_zh = ELEMENT_MAP.get(elem_en, elem_en)
+            else:
+                path_en, elem_en, path_zh, elem_zh = "", "", "", ""
 
             # 颜色
-            path_en = PATH_MAP_ZH_TO_EN.get(path_zh, "")
-            elem_en = ELEMENT_MAP_ZH_TO_EN.get(elem_zh, "")
             path_color = PATH_COLORS.get(path_en, Colors.TEXT_PRIMARY)
             elem_color = ELEMENT_COLORS.get(elem_en, Colors.TEXT_PRIMARY)
 
@@ -932,8 +967,6 @@ class BattleSimulatorWindow(QMainWindow):
                 _RowCharData(char_id=c.id, name=c.name_zh or c.name_en, path=c.path, element=c.element),
             )
             self.team_table.setItem(row, 0, name_item)
-            self.team_table.setItem(row, 1, QTableWidgetItem(PATH_MAP.get(c.path, c.path)))
-            self.team_table.setItem(row, 2, QTableWidgetItem(ELEMENT_MAP.get(c.element, c.element)))
             self._update_element_bonus_tooltips()
             self._update_overview()
             # 异步加载真实详情（技能/面板自动填充）
@@ -987,14 +1020,24 @@ class BattleSimulatorWindow(QMainWindow):
         row_data.loaded = True
         name_item.setData(Qt.UserRole, row_data)
 
-        # 自动填充面板列（真实基础值，用户可手动修改模拟遗器加成）
+        # 自动填充面板列（角色基础 + 行迹加成 = 游戏面板最终值；
+        # 行迹是常驻加成而非 buff，用户可手动修改表格模拟遗器加成）
         s = row_data.stats80
-        self._set_cell_value(row, COL_HP, int(s.get("hp_base", 0) + s.get("hp_add", 0) * 80))
-        self._set_cell_value(row, COL_ATK, int(s.get("attack_base", 0) + s.get("attack_add", 0) * 80))
-        self._set_cell_value(row, COL_DEF, int(s.get("defence_base", 0) + s.get("defence_add", 0) * 80))
-        self._set_cell_value(row, COL_SPD, float(s.get("speed_base", 0)))
-        self._set_cell_value(row, COL_CRIT_RATE, float(s.get("critical_chance", 0.05)))
-        self._set_cell_value(row, COL_CRIT_DMG, float(s.get("critical_damage", 0.5)))
+        base = convert_stats80(s)
+        trace = extract_trace_bonuses(row_data.skill_trees_raw)
+        final = StatCalculator(base=base, bonus=trace).final()
+        self._set_cell_value(row, COL_HP, int(final.hp))
+        self._set_cell_value(row, COL_ATK, int(final.atk))
+        self._set_cell_value(row, COL_DEF, int(final.defense))
+        self._set_cell_value(row, COL_SPD, final.spd)
+        self._set_cell_value(row, COL_CRIT_RATE, final.crit_rate)
+        self._set_cell_value(row, COL_CRIT_DMG, final.crit_dmg)
+        self._set_cell_value(row, COL_BREAK_EFFECT, final.break_effect)
+        self._set_cell_value(row, COL_EFFECT_RES, final.effect_res)
+        self._set_cell_value(row, COL_ENERGY_REGEN, final.energy_regen)
+        self._set_cell_value(row, COL_EFFECT_HIT, final.effect_hit)
+        self._set_cell_value(row, COL_OUTGOING_HEAL, final.outgoing_heal)
+        self._set_cell_value(row, COL_DMG_BONUS, final.dmg_bonus)
         self._update_overview()
 
         # freesr 导入时序钩子：详情加载完成时补填已导入行的最终面板
@@ -1023,13 +1066,21 @@ class BattleSimulatorWindow(QMainWindow):
             text = str(value)
         self.team_table.setItem(row, col, QTableWidgetItem(text))
 
+    def _set_lightcone_cell(self, row: int, name: str) -> None:
+        """写入光锥列（携带光锥名）。"""
+        self.team_table.setItem(row, COL_LIGHTCONE, QTableWidgetItem(name))
+
     def _update_element_bonus_tooltips(self) -> None:
         """属性增伤列 tooltip：按行角色属性动态标注。"""
         if not hasattr(self, "team_table"):
             return
         for row in range(self.team_table.rowCount()):
-            elem_item = self.team_table.item(row, 2)
-            elem_zh = elem_item.text().strip() if elem_item else ""
+            elem_zh = ""
+            name_item = self.team_table.item(row, 0)
+            if name_item is not None:
+                row_data = name_item.data(Qt.UserRole)
+                if isinstance(row_data, _RowCharData) and row_data.element:
+                    elem_zh = ELEMENT_MAP.get(row_data.element, row_data.element)
             item = self.team_table.item(row, COL_DMG_BONUS)
             if item is None:
                 item = QTableWidgetItem("0")
@@ -1190,12 +1241,16 @@ class BattleSimulatorWindow(QMainWindow):
             if not isinstance(row_data, _RowCharData) or not row_data.stats80:
                 continue  # 详情未就绪，等待 _on_detail_loaded 钩子补调
 
-            # 光锥 80 级行（缺失按 0 处理）
+            # 光锥 80 级行（缺失按 0 处理；同时存入行数据供面板基础值显示与光锥名展示）
             lc_stats80 = None
             lcs = profile.lightcones.get(char_id, [])
             if lcs:
                 item_id = lcs[0].item_id
-                lc_stats80 = job["lightcone_rows"].get(item_id)
+                lc_info = job["lightcone_rows"].get(item_id) or {}
+                lc_stats80 = lc_info.get("stats80")
+                row_data.lightcone_name = lc_info.get("name", "")
+            row_data.lightcone_stats80 = lc_stats80 or {}
+            self._set_lightcone_cell(row, row_data.lightcone_name)
 
             final = compute_panel(
                 row_data.stats80,
@@ -1229,11 +1284,14 @@ class BattleSimulatorWindow(QMainWindow):
         ]
         for row, (uid, name, path, elem, hp, atk, def_, spd, cr, cd) in enumerate(defaults):
             name_item = QTableWidgetItem(name)
-            # 重置行数据（清掉可能的旧真实角色残留）
-            name_item.setData(Qt.UserRole, _RowCharData(char_id=""))
+            # 重置行数据（清掉可能的旧真实角色残留；命途/属性存英文原始值供侧栏显示）
+            name_item.setData(Qt.UserRole, _RowCharData(
+                char_id="",
+                name=name,
+                path=PATH_MAP_ZH_TO_EN.get(path, ""),
+                element=ELEMENT_MAP_ZH_TO_EN.get(elem, ""),
+            ))
             self.team_table.setItem(row, 0, name_item)
-            self.team_table.setItem(row, 1, QTableWidgetItem(path))
-            self.team_table.setItem(row, 2, QTableWidgetItem(elem))
             self._set_cell_value(row, COL_HP, hp)
             self._set_cell_value(row, COL_ATK, atk)
             self._set_cell_value(row, COL_DEF, def_)
@@ -1243,6 +1301,68 @@ class BattleSimulatorWindow(QMainWindow):
             for col in (COL_BREAK_EFFECT, COL_EFFECT_RES, COL_ENERGY_REGEN,
                         COL_EFFECT_HIT, COL_OUTGOING_HEAL, COL_DMG_BONUS):
                 self._set_cell_value(row, col, 0.0)
+        self._update_element_bonus_tooltips()
+        self._update_overview()
+
+    # ── 队伍配置缓存 ─────────────────────────────────
+
+    def _save_team_config(self) -> None:
+        """保存队伍配置（表格内容 + 行数据）到缓存文件。"""
+        rows = []
+        for row in range(self.team_table.rowCount()):
+            name_item = self.team_table.item(row, 0)
+            if name_item is None or not name_item.text().strip():
+                continue
+            entry = {"name": name_item.text().strip()}
+            row_data = name_item.data(Qt.UserRole)
+            entry["row_data"] = asdict(row_data) if isinstance(row_data, _RowCharData) else None
+            entry["cells"] = {}
+            for col in range(1, COL_COUNT):
+                item = self.team_table.item(row, col)
+                entry["cells"][col] = item.text() if item else ""
+            rows.append(entry)
+        try:
+            TEAM_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            TEAM_CONFIG_PATH.write_text(
+                json.dumps({"version": 2, "rows": rows}, ensure_ascii=False, indent=1),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass  # 缓存写入失败不影响使用
+
+    def _load_team_config(self) -> None:
+        """加载队伍配置缓存（存在且可解析时覆盖默认配置）。
+
+        旧版本（13 列，无光锥列）缓存自动迁移：属性列号 +1。
+        """
+        if not TEAM_CONFIG_PATH.exists():
+            return
+        try:
+            data = json.loads(TEAM_CONFIG_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if isinstance(data, dict) and data.get("version") == 2:
+            rows = data.get("rows", [])
+        else:
+            # 旧格式（13 列）：属性列号整体 +1（插入光锥列）
+            rows = data if isinstance(data, list) else []
+            for entry in rows:
+                cells = entry.get("cells", {})
+                entry["cells"] = {int(k) + 1: v for k, v in cells.items()}
+        for i, entry in enumerate(rows[: self.team_table.rowCount()]):
+            name_item = QTableWidgetItem(entry.get("name", ""))
+            rd_raw = entry.get("row_data")
+            if isinstance(rd_raw, dict):
+                try:
+                    rd = _RowCharData(**rd_raw)
+                except TypeError:
+                    rd = _RowCharData(char_id="")
+            else:
+                rd = _RowCharData(char_id="")
+            name_item.setData(Qt.UserRole, rd)
+            self.team_table.setItem(i, 0, name_item)
+            for col, text in entry.get("cells", {}).items():
+                self.team_table.setItem(i, int(col), QTableWidgetItem(str(text)))
         self._update_element_bonus_tooltips()
         self._update_overview()
 
@@ -1283,12 +1403,14 @@ class BattleSimulatorWindow(QMainWindow):
                 continue
             name = name_item.text().strip()
             uid = f"char{row+1}"
-            path_zh = cell_text(row, COL_PATH, "存护")
-            path = PATH_MAP_ZH_TO_EN.get(path_zh, path_zh)
-            elem_zh = cell_text(row, COL_ELEMENT, "火")
-            elem = ELEMENT_MAP_ZH_TO_EN.get(elem_zh, elem_zh)
-
+            # 命途/属性从行数据读取（表格不显示这两列，侧栏概览展示）
             row_data = name_item.data(Qt.UserRole)
+            if isinstance(row_data, _RowCharData) and row_data.path:
+                path = row_data.path
+                elem = row_data.element
+            else:
+                path, elem = "Knight", "Fire"  # 兜底：存护/火
+
             if isinstance(row_data, _RowCharData) and row_data.loaded and row_data.skills_raw:
                 # 真实角色：真实技能 + 真实面板（表格数值已自动填充，用户可改的为面板）
                 char = build_character_unit(
@@ -1304,7 +1426,8 @@ class BattleSimulatorWindow(QMainWindow):
                     char_id=row_data.char_id,
                     dmg_bonus=cell_float(row, COL_DMG_BONUS, 0.0),
                     initial_energy=row_data.sp_value,
-                    skill_trees_raw=row_data.skill_trees_raw,
+                    # 行迹加成已包含在表格面板值中（作为 base_stats），不再重复叠加
+                    skill_trees_raw=None,
                 )
                 # 用户手动编辑的面板数值覆盖真实基础值（模拟遗器加成）
                 char.base_stats.hp_base = cell_float(row, COL_HP, char.base_stats.hp_base)
@@ -1389,6 +1512,7 @@ class BattleSimulatorWindow(QMainWindow):
             initial_sp=initial_sp,
         )
         self._interactive_sim.setup()
+        # 战斗开始（含秘技进战效果）后停在待推进阶段：按空格才轮到第一个行动者
         self._interactive_snapshots = [self._interactive_sim.snapshot()]
         self._interactive_old_logs = []
         self._interactive_active = True
@@ -1411,16 +1535,37 @@ class BattleSimulatorWindow(QMainWindow):
             return
 
         actor = sim.action_queue.next_actor()
-        # 怪物/阿哈不在此处理
-        if actor.is_monster or actor.unit_id == "__aha__":
+        # 怪物/阿哈/倒计时不在此处理
+        if sim.is_auto_unit(actor):
             return
+
+        # 待推进状态按 Q/E：视为"推进 + 行动"——先推进到下个行动者位置再释放技能
+        if sim.pending_av_actor != actor.unit_id:
+            sim.advance_av()
 
         char = sim._get_character(actor.unit_id)
         if char is None:
             return
 
-        # SP 检查：战技需要 1 点 SP
-        if skill_type == SkillType.SKILL and not sim.sp.can_consume(1):
+        # 模块技能限制检查（如千冶未开启结界/生命 ≤1 时无法施放战技）：弹窗提示
+        if skill_type == SkillType.SKILL:
+            module = sim.char_modules.get(char.unit_id)
+            if module is not None:
+                reason = module.skill_deny_reason(sim, char)
+                if reason:
+                    QMessageBox.warning(self, "无法施放战技", reason)
+                    return
+
+        # SP 检查：战技消耗 SP 时才需要（千冶等战技不耗 SP 的角色不受限）
+        skill_for_sp = next(
+            (s for s in char.skills.values() if s.skill_type == SkillType.SKILL), None
+        )
+        if (
+            skill_type == SkillType.SKILL
+            and skill_for_sp is not None
+            and skill_for_sp.sp_cost > 0
+            and not sim.sp.can_consume(1)
+        ):
             QMessageBox.warning(self, "战技点不足", "当前 SP 为 0，无法使用战技")
             return
 
@@ -1447,12 +1592,22 @@ class BattleSimulatorWindow(QMainWindow):
             return
 
         actor = sim.action_queue.next_actor()
-        if not actor.is_monster and actor.unit_id != "__aha__":
-            return  # 不是怪物/阿哈
-
-        log = sim.step()
-        if log is None:
-            self._interactive_active = False
+        if sim.pending_av_actor != actor.unit_id:
+            # 待推进（战斗开始/任意行动完成）：推进时间到下个行动者位置
+            sim.advance_av()
+            # 怪物/阿哈/倒计时无需选择技能：自动执行其行动并回到待推进状态
+            actor = sim.action_queue.next_actor()
+            if sim.is_auto_unit(actor):
+                log = sim.step()
+                if log is None:
+                    self._interactive_active = False
+        elif sim.is_auto_unit(actor):
+            # 已轮到怪物/阿哈/倒计时（异常状态，正常流程推进后自动行动）：执行其行动
+            log = sim.step()
+            if log is None:
+                self._interactive_active = False
+        else:
+            return  # 已轮到角色：用 Q/E 行动，空格无操作
         self._interactive_snapshots.append(sim.snapshot())
         self._interactive_old_logs = []
         self._update_interactive_display()
@@ -1526,13 +1681,6 @@ class BattleSimulatorWindow(QMainWindow):
             battle_ended = True
         else:
             actor = sim.action_queue.next_actor()
-            if actor.is_monster:
-                actor_type = "怪物"
-            elif actor.unit_id == "__aha__":
-                actor_type = "阿哈"
-            else:
-                actor_type = "角色"
-
             all_energy = "  |  ".join(
                 f"{c.name}: {c.energy:.0f}" for c in sim.characters
             )
@@ -1542,12 +1690,29 @@ class BattleSimulatorWindow(QMainWindow):
                 total_laugh = sum(c.laugh_point for c in elation_chars)
                 laugh_info = f"  笑点: {total_laugh:.0f}"
 
-            status = (
-                f"当前行动者: [{actor.name}]（{actor_type}）  "
-                f"总AV: {sim.total_av:.1f}/{sim.max_av:.0f}"
-                f"{laugh_info}\n"
-                f"全队能量: {all_energy}"
-            )
+            if sim.pending_av_actor != actor.unit_id:
+                # 待推进：战斗开始（秘技进战）/行动完成，时间停在当前位置，按空格轮到下个行动者
+                status = (
+                    f"按空格推进到下个行动者，或按Q/E推进到下个行动者并自动尝试释放普攻/战技\n"
+                    f"总AV: {sim.total_av:.1f}/{sim.max_av:.0f}"
+                    f"{laugh_info}\n"
+                    f"全队能量: {all_energy}"
+                )
+            else:
+                if actor.is_monster:
+                    actor_type = "怪物"
+                elif actor.unit_id == "__aha__":
+                    actor_type = "阿哈"
+                elif actor.unit_id in sim.countdown_units:
+                    actor_type = "倒计时"
+                else:
+                    actor_type = "角色"
+                status = (
+                    f"当前行动者: [{actor.name}]（{actor_type}）  "
+                    f"总AV: {sim.total_av:.1f}/{sim.max_av:.0f}"
+                    f"{laugh_info}\n"
+                    f"全队能量: {all_energy}"
+                )
 
         self.interactive_status_label.setText(status)
 
@@ -1590,12 +1755,30 @@ class BattleSimulatorWindow(QMainWindow):
 
         if is_active and sim.action_queue.entries:
             actor = sim.action_queue.next_actor()
-            if actor.is_monster or actor.unit_id == "__aha__":
+            if sim.pending_av_actor != actor.unit_id:
+                # 待推进（战斗开始 / 行动完成）：按推进键轮到下个行动者
                 self.btn_advance.setEnabled(True)
+                self.btn_advance.setText("推进（空格）")
+            elif sim.is_auto_unit(actor):
+                # 轮到怪物/阿哈/倒计时：按推进键执行其行动
+                self.btn_advance.setEnabled(True)
+                self.btn_advance.setText("行动（空格）")
             else:
                 self.btn_normal.setEnabled(True)
-                # 战技按钮：SP 不足时禁用
-                self.btn_skill.setEnabled(sim.sp.can_consume(1))
+                # 战技按钮：SP 不足时禁用（战技不耗 SP 的角色不受限）
+                actor_char = sim._get_character(actor.unit_id)
+                skill_for_sp = (
+                    next(
+                        (s for s in actor_char.skills.values() if s.skill_type == SkillType.SKILL),
+                        None,
+                    )
+                    if actor_char is not None
+                    else None
+                )
+                self.btn_skill.setEnabled(
+                    sim.sp.can_consume(1)
+                    or (skill_for_sp is not None and skill_for_sp.sp_cost <= 0)
+                )
 
     def _rebuild_energy_orbs(self) -> None:
         """根据当前队伍重建能量图标（含角色头像）。"""
@@ -1609,7 +1792,7 @@ class BattleSimulatorWindow(QMainWindow):
         if not self._interactive_sim:
             return
 
-        for char in self._interactive_sim.characters:
+        for i, char in enumerate(self._interactive_sim.characters):
             orb = EnergyOrbWidget(
                 name=char.name,
                 max_energy=char.base_stats.energy_max,
@@ -1619,6 +1802,8 @@ class BattleSimulatorWindow(QMainWindow):
             if char.char_id:
                 pix = _load_character_icon(char.char_id)
                 orb.set_avatar(pix)
+            # 点击头像查看角色 buff 列表
+            orb.clicked.connect(lambda idx=i: self._show_char_buffs(idx))
             self._energy_orbs.append(orb)
             self.energy_orbs_container.addWidget(orb)
 
@@ -1628,10 +1813,21 @@ class BattleSimulatorWindow(QMainWindow):
             return
         sim = self._interactive_sim
 
-        # 当前行动者 unit_id
+        # 当前行动者 unit_id 与待命（虚线）行动者
         active_unit_id = ""
+        pending_unit_id = ""
         if sim.action_queue.entries:
-            active_unit_id = sim.action_queue.next_actor().unit_id
+            actor = sim.action_queue.next_actor()
+            if sim.pending_av_actor == actor.unit_id:
+                active_unit_id = actor.unit_id  # 已轮到该行动者（实线）
+            elif sim.pending_av_actor:
+                # 待推进：刚行动完的角色实线高亮（行动后插队窗口），
+                # 下个行动的角色虚线高亮（即将轮到）
+                active_unit_id = sim.pending_av_actor
+                pending_unit_id = actor.unit_id
+            else:
+                # 战斗开始待推进：下个行动的角色虚线高亮
+                pending_unit_id = actor.unit_id
 
         for i, orb in enumerate(self._energy_orbs):
             if i >= len(sim.characters):
@@ -1640,6 +1836,232 @@ class BattleSimulatorWindow(QMainWindow):
             orb.set_max_energy(char.base_stats.energy_max)
             orb.set_energy(char.energy)
             orb.set_active(char.unit_id == active_unit_id)
+            orb.set_pending(char.unit_id == pending_unit_id)
+            # 充能指示：圆点（不死途追击充能）/ 文字（千冶天赋充能 "6/9"）
+            module = sim.char_modules.get(char.unit_id)
+            charge = getattr(module, "charge", None)
+            if charge is not None:
+                style = getattr(module, "CHARGE_STYLE", "dots")
+                # 充能上限：模块显式声明（不死途 3、千冶 9），缺失时按样式兜底
+                charge_max = int(getattr(
+                    module, "CHARGE_MAX", 3 if style == "dots" else 9
+                ))
+                if style == "text":
+                    orb.set_charge_text(int(charge), charge_max)
+                else:
+                    orb.set_charge(charge, charge_max)
+            else:
+                orb.set_charge(None)
+
+    # ── 角色 buff 查看 ─────────────────────────────────
+
+    # stat 字段 → 中文描述
+    _STAT_NAMES_ZH = {
+        "hp_pct": "生命值提升", "atk_pct": "攻击力提升", "def_pct": "防御力提升",
+        "spd_pct": "速度提升", "crit_rate": "暴击率提升", "crit_dmg": "暴击伤害提升",
+        "dmg_bonus": "伤害提高", "break_effect": "击破特攻提升",
+        "effect_hit": "效果命中提升", "effect_res": "效果抵抗提升",
+        "energy_regen": "能量恢复效率提升", "outgoing_heal": "治疗量加成提升",
+        "hp_flat": "生命值提升", "atk_flat": "攻击力提升", "def_flat": "防御力提升",
+        "spd_flat": "速度提升",
+        "good_joke": "好活当赏", "laugh_point": "笑点",
+        "elation_dmg": "欢愉度提升", "laugh_bonus": "增笑提升",
+    }
+    # 百分比语义字段（value 为小数，显示为 %）
+    _PCT_BUFF_STATS = {
+        "hp_pct", "atk_pct", "def_pct", "spd_pct", "crit_rate", "crit_dmg",
+        "dmg_bonus", "break_effect", "effect_hit", "effect_res",
+        "energy_regen", "outgoing_heal", "good_joke", "elation_dmg", "laugh_bonus",
+    }
+
+    def _buff_desc(self, buff) -> str:
+        """Buff 文字描述（数值包含在描述中，如"攻击力提升 20%"）。"""
+        value = buff.value * buff.current_stacks
+        if buff.stat in self._PCT_BUFF_STATS:
+            text = f"{value * 100:.1f}%"
+        else:
+            text = f"{value:.0f}"
+        stat_zh = self._STAT_NAMES_ZH.get(buff.stat, buff.stat)
+        return f"{stat_zh} {text}"
+
+    def _buffs_html(self, char: CharacterUnit, char_index: int) -> str:
+        """生成 buff 列表 HTML（名称加粗、层数括号、描述换行）。
+
+        包含：BuffManager buff、模块资源（婪酣等）、额外能力（行迹被动）。
+        """
+        parts: list[str] = []
+
+        def append(name: str, desc: str, stacks: str = "") -> None:
+            name_html = f"<b>{name}</b>"
+            if stacks:
+                name_html += f"（{stacks}）"
+            parts.append(f"{name_html}<br>{desc}")
+
+        # Buff（来自 BuffManager）
+        for buff in char.buff_mgr.buffs:
+            stacks = ""
+            if buff.max_stacks > 1 or buff.current_stacks > 1:
+                stacks = f"{buff.current_stacks}/{buff.max_stacks}"
+            append(buff.name, self._buff_desc(buff), stacks)
+
+        # 模块资源（如不死途婪酣层数）
+        module = self._interactive_sim.char_modules.get(char.unit_id)
+        if module is not None:
+            greed = getattr(module, "greed", None)
+            if greed is not None:
+                append("婪酣", f"婪酣层数 {greed}", f"{greed}")
+
+        # 额外能力：自身全部显示；他人仅光环（"我方目标"）可见
+        for src_row, source, name, desc, is_aura in self._extra_abilities():
+            if src_row != char_index and not is_aura:
+                continue
+            label = name if src_row == char_index else f"{name}（{source}）"
+            append(label, desc)
+
+        return "<br><br>".join(parts) if parts else "无 buff"
+
+    def _extra_abilities(self) -> list[tuple[int, str, str, str, bool]]:
+        """收集队伍所有角色的额外能力（行迹 point_type=3）。
+
+        返回 [(来源行号, 来源角色名, 能力名, 插值后描述, 是否全队光环)]。
+        光环类效果（描述含"我方目标/我方"，如"头狼"我方暴伤）对所有我方角色可见；
+        自身效果（如"影肢"追加攻击加成）仅显示在来源角色自身。
+        """
+        result: list[tuple[int, str, str, str, bool]] = []
+        for row in range(self.team_table.rowCount()):
+            name_item = self.team_table.item(row, 0)
+            if name_item is None:
+                continue
+            row_data = name_item.data(Qt.UserRole)
+            if not isinstance(row_data, _RowCharData):
+                continue
+            source = row_data.name or name_item.text().strip()
+            for group in row_data.skill_trees_raw.values():
+                if not isinstance(group, dict):
+                    continue
+                for point in group.values():
+                    if not isinstance(point, dict):
+                        continue
+                    if point.get("point_type") != 3 or not point.get("point_name"):
+                        continue
+                    desc = clean_text(point.get("point_desc"), point.get("param_list"))
+                    if desc:
+                        is_aura = "我方目标" in desc or "我方" in desc
+                        result.append((row, source, point.get("point_name", ""), desc, is_aura))
+        return result
+
+    def _char_base_stats(self, char_index: int) -> BaseStats | None:
+        """角色装备光锥后的基础值（无遗器/行迹加成）。
+
+        数据来源：行数据中保存的详情 stats80 + freesr 光锥基础；
+        无真实数据（预设角色）返回 None。
+        """
+        name_item = self.team_table.item(char_index, 0)
+        if name_item is None:
+            return None
+        row_data = name_item.data(Qt.UserRole)
+        if not isinstance(row_data, _RowCharData) or not row_data.stats80:
+            return None
+        base = convert_stats80(row_data.stats80)
+        if row_data.lightcone_stats80:
+            lc = lightcone_base_stats(row_data.lightcone_stats80)
+            base.hp_base += lc.hp_base
+            base.atk_base += lc.atk_base
+            base.def_base += lc.def_base
+        return base
+
+    def _show_char_buffs(self, char_index: int) -> None:
+        """点击角色头像：弹出角色 buff 列表（含模块资源如婪酣）。"""
+        if not self._interactive_sim or char_index >= len(self._interactive_sim.characters):
+            return
+        char = self._interactive_sim.characters[char_index]
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"{char.name} 的 Buff")
+        dlg.resize(600, 420)
+        layout = QVBoxLayout(dlg)
+
+        # 主要面板属性（生命/攻击/防御/速度/暴击率/暴击伤害）
+        final = char.final_stats()
+        base = self._char_base_stats(char_index)
+
+        def _fmt_pair(value: float, base_value: float, pct: bool = False) -> str:
+            """基础 + 增量 = 最终 或 仅最终。"""
+            if base is not None:
+                fmt = lambda v: f"{v * 100:.1f}%" if pct else f"{v:.1f}" if base_value < 100 else f"{v:.0f}"
+                return f"{fmt(base_value)} + {fmt(value - base_value)} = {fmt(value)}"
+            return f"{value * 100:.1f}%" if pct else f"{value:.1f}"
+
+        def _stats_text(show_base: bool) -> str:
+            if show_base and base is not None:
+                return (
+                    f"生命 {_fmt_pair(final.hp, base.hp_base)}"
+                    f"   |   攻击 {_fmt_pair(final.atk, base.atk_base)}"
+                    f"   |   防御 {_fmt_pair(final.defense, base.def_base)}\n"
+                    f"速度 {_fmt_pair(final.spd, base.spd_base)}"
+                    f"   |   暴击率 {_fmt_pair(final.crit_rate, base.crit_rate, pct=True)}"
+                    f"   |   暴击伤害 {_fmt_pair(final.crit_dmg, base.crit_dmg, pct=True)}"
+                )
+            return (
+                f"生命 {final.hp:.0f}   |   攻击 {final.atk:.0f}   |   防御 {final.defense:.0f}\n"
+                f"速度 {final.spd:.1f}   |   暴击率 {final.crit_rate * 100:.1f}%"
+                f"   |   暴击伤害 {final.crit_dmg * 100:.1f}%"
+            )
+
+        main_stats = QLabel(_stats_text(False))  # 默认仅最终值
+        main_stats.setWordWrap(True)
+        main_stats.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; font-weight: 600;")
+        layout.addWidget(main_stats)
+
+        # 显示属性基础值开关：开启显示"基础 + 增量 = 最终"，关闭仅最终
+        base_check = QCheckBox("显示属性基础值")
+        base_check.setCursor(Qt.PointingHandCursor)
+        base_check.setEnabled(base is not None)  # 无真实基础数据（预设角色）时禁用
+        base_check.toggled.connect(lambda on: main_stats.setText(_stats_text(on)))
+        layout.addWidget(base_check)
+
+        # 展开详情：其它属性（默认隐藏）
+        detail_stats = QLabel(
+            f"击破特攻 {final.break_effect * 100:.1f}%"
+            f"   |   效果命中 {final.effect_hit * 100:.1f}%"
+            f"   |   效果抵抗 {final.effect_res * 100:.1f}%\n"
+            f"能量恢复效率 {final.energy_regen * 100:.1f}%"
+            f"   |   治疗量加成 {final.outgoing_heal * 100:.1f}%"
+            f"   |   属性增伤 {final.dmg_bonus * 100:.1f}%\n"
+            f"能量 {char.energy:.0f}/{final.energy_max:.0f}"
+        )
+        detail_stats.setWordWrap(True)
+        detail_stats.setStyleSheet(f"color: {Colors.TEXT_SECONDARY};")
+        detail_stats.hide()
+        layout.addWidget(detail_stats)
+
+        toggle_btn = QPushButton("▸ 展开详情")
+        toggle_btn.setCheckable(True)
+        toggle_btn.setCursor(Qt.PointingHandCursor)
+
+        def _toggle_detail(checked: bool) -> None:
+            detail_stats.setVisible(checked)
+            toggle_btn.setText("▾ 收起详情" if checked else "▸ 展开详情")
+
+        toggle_btn.toggled.connect(_toggle_detail)
+        layout.addWidget(toggle_btn, alignment=Qt.AlignLeft)
+
+        # Buff 列表（富文本：名称加粗、层数括号、描述换行）
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setFrameShape(QFrame.NoFrame)
+        text_edit.setStyleSheet(
+            f"background-color: {Colors.BG_PANEL}; color: {Colors.TEXT_PRIMARY};"
+            f" border: 1px solid {Colors.BORDER}; border-radius: 5px;"
+        )
+        text_edit.setHtml(self._buffs_html(char, char_index))
+        layout.addWidget(text_edit, stretch=1)
+
+        close_btn = QPushButton("关闭")
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.clicked.connect(dlg.accept)
+        layout.addWidget(close_btn, alignment=Qt.AlignRight)
+        dlg.exec()
 
     def _interactive_fill_result_tabs(self) -> None:
         """交互模拟战斗结束后，构建结果并填充各结果 Tab。"""
@@ -1696,6 +2118,28 @@ class BattleSimulatorWindow(QMainWindow):
                 item.setForeground(QColor(Colors.TEXT_DISABLED))
             self.interactive_log_table.setItem(row, col, item)
 
+    def eventFilter(self, obj, event) -> bool:
+        """应用级按键拦截：交互模式下焦点控件不消费操作键。
+
+        仅拦截交互操作键（Q/E/空格/回车/1-4），其余按键照常传递；
+        有模态对话框（如 QMessageBox）时不拦截。
+        """
+        if (
+            event.type() == QEvent.KeyPress
+            and self._interactive_active
+            and self._interactive_sim
+            and self.tabs.currentIndex() == 1
+            and QApplication.activeModalWidget() is None
+            and event.key() in (
+                Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter,
+                Qt.Key_E, Qt.Key_Q,
+                Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4,
+            )
+        ):
+            self.keyPressEvent(event)
+            return True
+        return super().eventFilter(obj, event)
+
     def keyPressEvent(self, event) -> None:
         """键盘事件处理（仅在交互模拟 Tab 激活时生效）。"""
         if not self._interactive_active or not self._interactive_sim:
@@ -1714,7 +2158,7 @@ class BattleSimulatorWindow(QMainWindow):
 
         key = event.key()
         actor = sim.action_queue.next_actor()
-        is_char = not actor.is_monster and actor.unit_id != "__aha__"
+        is_char = not sim.is_auto_unit(actor)
 
         # 终结技插队（任意时刻）
         if key == Qt.Key_1:
@@ -1730,6 +2174,11 @@ class BattleSimulatorWindow(QMainWindow):
             self._interactive_ultra(3)
             return
 
+        # 空格/回车：推进（怪物行动 / 角色行动后轮转到下个行动者）
+        if key in (Qt.Key_Space, Qt.Key_Return):
+            self._interactive_advance()
+            return
+
         if is_char:
             if key == Qt.Key_E:
                 self._interactive_step(SkillType.SKILL)
@@ -1738,8 +2187,8 @@ class BattleSimulatorWindow(QMainWindow):
                 self._interactive_step(SkillType.NORMAL)
                 return
         else:
-            # 怪物/阿哈：按空格/回车/E/Q 推进
-            if key in (Qt.Key_Space, Qt.Key_Return, Qt.Key_E, Qt.Key_Q):
+            # 怪物/阿哈/倒计时：按 E/Q 执行其行动
+            if key in (Qt.Key_E, Qt.Key_Q):
                 self._interactive_advance()
                 return
 
@@ -1821,8 +2270,6 @@ class BattleSimulatorWindow(QMainWindow):
             notes = log.notes
             if log.enemy_broken:
                 notes = "【击破】" + notes
-            if log.sp_after != 3:
-                notes += f" SP={log.sp_after}"
             self.log_table.setItem(i, 7, QTableWidgetItem(notes))
 
     def _fill_gantt(self, result: BattleResult) -> None:
@@ -1975,7 +2422,9 @@ class BattleSimulatorWindow(QMainWindow):
     # ── 清理 ────────────────────────────────────────────
 
     def closeEvent(self, event) -> None:
-        """窗口关闭：终止仍在运行的详情/光锥加载线程。"""
+        """窗口关闭：保存队伍配置缓存 + 终止仍在运行的详情/光锥加载线程。"""
+        if hasattr(self, "team_table"):
+            self._save_team_config()
         threads = dict(getattr(self, "_detail_threads", {}))
         threads.update(getattr(self, "_lc_threads", {}))
         for thread in threads.values():

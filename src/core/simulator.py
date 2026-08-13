@@ -36,7 +36,7 @@ from .damage import (
     calculate_damage,
     ELATION_BASE_LEVEL_80,
 )
-from .skill import Skill, SkillType
+from .skill import Skill, SkillType, get_skill_by_type
 from .sp import SkillPoint
 from .stats import BaseStats, FinalStats, StatBonus, StatCalculator
 
@@ -60,7 +60,8 @@ class EnemyState:
     level: int = 80
     speed: float = 100.0             # 行动速度（默认 100，进队列用）
     resistance: dict[str, float] = field(default_factory=dict)  # {属性: 抗性}
-    def_reduce: float = 0.0  # 敌方全体减防（由角色模块写入，随条件存在与否更新）
+    def_reduce: float = 0.0  # 敌方减防（模块各自维护贡献值，增量式累加/撤销）
+    vulnerability: float = 0.0  # 敌方易伤（同上，增量式管理，如千冶【煞火缠身】）
     # 减伤 / 抗性 / 防御 buff（由 BuffManager 管理）
     buff_mgr: BuffManager = field(default_factory=lambda: BuffManager(unit_id=""))
 
@@ -113,6 +114,9 @@ class CharacterUnit:
     elation_skill_index: int = 0  # 欢愉技参演编号
     elation_skill_level: int = 1  # 欢愉技等级（识别逻辑 TODO，暂只存储）
     char_id: str = ""        # nanoka 角色 ID（用于加载头像，空表示无头像）
+    current_hp: float = 0.0  # 当前生命值（最小 HP 模型：模块在 on_battle_start 初始化
+    #                        为面板生命上限，生命消耗/回复由模块管理；上限取 final_stats().hp）
+    skill_trees_raw: dict = field(default_factory=dict)  # 原始行迹（模块读额外能力参数用）
 
     def __post_init__(self) -> None:
         self.buff_mgr.unit_id = self.unit_id
@@ -150,6 +154,8 @@ class DamageRecord:
 
     追加攻击（FOLLOW_UP）可造成任何伤害类型（常规/击破/超击破/持续/欢愉），
     因此每个伤害段同时标注 skill_type 与 damage_type。
+    部分伤害同时属于两种技能类型（如千冶天赋触发的战技：既按战技施放、
+    又被视为追加攻击），用 secondary_skill_type 标注第二种类型。
     """
 
     value: float
@@ -157,6 +163,7 @@ class DamageRecord:
     damage_type: DamageType
     element: str = ""
     target_id: str = ""
+    secondary_skill_type: SkillType | None = None  # 同时属于的第二种技能类型（无则 None）
 
 
 @dataclass
@@ -249,6 +256,17 @@ class BattleSimulator:
     current_turn: int = 0
     # 角色技能模块（unit_id → 模块实例），由 setup() 按 char.char_id 挂载
     char_modules: dict[str, CharacterModule] = field(default_factory=dict)
+    # advance_av() 已推进到的行动者（手动推进键幂等标记；交互模式用）
+    pending_av_actor: str | None = None
+    # 行动条倒计时单位（倒计时 unit_id → 所属角色 unit_id）
+    # 如千冶无量忿怒倒计时：倒计时行动时触发模块 on_countdown（结界解除）
+    countdown_units: dict[str, str] = field(default_factory=dict)
+    # 行动令牌：每次技能施放（_resolve_skill）递增。
+    # 一次行动内的所有命中（主伤害 + 模块 on_skill_end 追击链）共享同一令牌，
+    # 供模块按"行动"粒度去重（如千冶天赋"每次攻击 +1 充能"——不死途终结技
+    # 后的强化追打/婪酣追打链整体视为一次行动）。模块可用 begin_new_action()
+    # 主动开启新行动（如千冶天赋额外施放的战技为独立行动）。
+    action_token: int = 0
 
     def setup(self) -> None:
         """战斗初始化。"""
@@ -299,6 +317,7 @@ class BattleSimulator:
 
         # 角色技能模块挂载（按 char.char_id 查注册表）
         self._init_char_modules()
+        self.pending_av_actor = None
 
     def _grant_laugh_point(self, amount: float) -> None:
         """获得笑点（若为首次则阿哈入队）。"""
@@ -339,6 +358,54 @@ class BattleSimulator:
             self.action_queue.remove("__aha__")
             self.aha_entry = None
 
+    # ── 行动条倒计时 ──────────────────────────────────────
+
+    def add_countdown(
+        self,
+        owner: CharacterUnit,
+        *,
+        speed: float,
+        name: str = "倒计时",
+    ) -> str:
+        """在行动序列上插入倒计时单位（如千冶无量忿怒倒计时）。
+
+        倒计时固定速度（如 70），回合开始时触发所属角色模块的 on_countdown
+        （结界解除等），随后从行动条移除。同角色已有倒计时时先移除旧的
+        （刷新位置）。
+
+        Args:
+            owner: 所属角色
+            speed: 倒计时速度
+            name: 显示名
+
+        Returns: 倒计时单位 ID
+        """
+        unit_id = f"__countdown_{owner.unit_id}__"
+        self._remove_countdown(unit_id)
+        self.countdown_units[unit_id] = owner.unit_id
+        self.action_queue.add(ActionEntry(
+            unit_id=unit_id,
+            name=name,
+            speed=speed,
+            current_av=AV_PER_ACTION / speed,
+            is_monster=False,
+        ))
+        return unit_id
+
+    def _remove_countdown(self, unit_id: str) -> None:
+        """从行动条移除倒计时单位。"""
+        if unit_id in self.countdown_units:
+            self.action_queue.remove(unit_id)
+            del self.countdown_units[unit_id]
+
+    def is_auto_unit(self, actor: ActionEntry) -> bool:
+        """该行动者是否自动行动（怪物/阿哈/倒计时），无需玩家选择技能。"""
+        return (
+            actor.is_monster
+            or actor.unit_id == "__aha__"
+            or actor.unit_id in self.countdown_units
+        )
+
     def run(self, actions: list[PlayerAction] | None = None) -> BattleResult:
         """执行战斗模拟。
 
@@ -362,12 +429,17 @@ class BattleSimulator:
                 break
 
             self.current_turn += 1
-            # 累计总行动值（本次行动消耗的 AV = 行动者当前 AV）
+            # 累计总行动值（本次行动消耗的 AV = 行动者当前 AV，一次性模式自动推进）
             self.total_av += actor.current_av
 
             # 阿哈时刻
             if actor.unit_id == "__aha__":
                 self._trigger_aha_moment()
+                continue
+
+            # 倒计时（如无量忿怒倒计时）：触发所属模块 on_countdown 后移除
+            if actor.unit_id in self.countdown_units:
+                self._countdown_act(actor)
                 continue
 
             # 怪物行动
@@ -437,11 +509,16 @@ class BattleSimulator:
             return None
 
         self.current_turn += 1
-        self.total_av += actor.current_av
+        # 交互模式：时间推进由 advance_av()（手动推进键）负责，行动本身不推进
 
         # 阿哈时刻
         if actor.unit_id == "__aha__":
             self._trigger_aha_moment()
+            return self.logs[-1] if self.logs else None
+
+        # 倒计时（如无量忿怒倒计时）：触发所属模块 on_countdown 后移除
+        if actor.unit_id in self.countdown_units:
+            self._countdown_act(actor)
             return self.logs[-1] if self.logs else None
 
         # 怪物行动
@@ -463,6 +540,9 @@ class BattleSimulator:
     def execute_ultra(self, char_index: int) -> ActionLog | None:
         """释放终结技（插队，不推进行动队列，不消耗回合）。
 
+        插队位置 = 当前时间（total_av）：交互模式中"行动后插队"停在行动者位置，
+        "轮到时插队"在手动推进（advance_av）之后位于下个行动者的位置。
+
         Args:
             char_index: 角色在队伍中的位置（0-3）
 
@@ -481,6 +561,12 @@ class BattleSimulator:
         if skill is None:
             return None
 
+        # 技能解析钩子（同回合行动）：无量忿怒下终结技切换为强化版等
+        resolved = self._resolve_skill_override(char, SkillType.ULTRA, skill)
+        if resolved is None:
+            return None
+        skill = resolved
+
         # 检查能量
         energy_cost = skill.energy_cost or self._get_energy_cost(char, SkillType.ULTRA)
         if char.energy < energy_cost:
@@ -491,7 +577,6 @@ class BattleSimulator:
             unit_id=char.unit_id,
             skill_type=SkillType.ULTRA,
             target_id=target_id,
-            notes="终结技（插队）",
         )
 
         return self._resolve_skill(char, skill, action, entry=None, is_turn=False)
@@ -510,6 +595,9 @@ class BattleSimulator:
             "aha_count": self.aha_count,
             "aha_entry": copy.deepcopy(self.aha_entry),
             "char_modules": copy.deepcopy(self.char_modules),
+            "pending_av_actor": self.pending_av_actor,
+            "countdown_units": dict(self.countdown_units),
+            "action_token": self.action_token,
         }
 
     def restore(self, snap: dict) -> None:
@@ -525,6 +613,9 @@ class BattleSimulator:
         self.aha_count = snap["aha_count"]
         self.aha_entry = copy.deepcopy(snap["aha_entry"])
         self.char_modules = copy.deepcopy(snap.get("char_modules", {}))
+        self.pending_av_actor = snap.get("pending_av_actor")
+        self.countdown_units = dict(snap.get("countdown_units", {}))
+        self.action_token = snap.get("action_token", 0)
 
     def _get_character(self, unit_id: str) -> CharacterUnit | None:
         for c in self.characters:
@@ -546,6 +637,14 @@ class BattleSimulator:
             return PlayerAction(
                 unit_id=char.unit_id,
                 skill_type=SkillType.ULTRA,
+                target_id=target,
+            )
+        # 战技不消耗 SP 的角色（如千冶）不受 SP 限制
+        skill = get_skill_by_type(char.skills, SkillType.SKILL)
+        if skill is not None and skill.sp_cost <= 0:
+            return PlayerAction(
+                unit_id=char.unit_id,
+                skill_type=SkillType.SKILL,
                 target_id=target,
             )
         # SP 够用战技
@@ -593,7 +692,54 @@ class BattleSimulator:
             self.action_queue.advance()
             return None
 
+        # 技能解析钩子：模块可替换技能（如千冶无量忿怒下普攻/终结技强化版）
+        # 或返回 None 拒绝施放（如千冶非无量忿怒/生命≤1 时无法施放战技）
+        resolved = self._resolve_skill_override(char, action.skill_type, skill)
+        if resolved is None:
+            # 技能无效：仍消耗回合，不结算，返回"无法施放"日志
+            # （避免与"战斗结束"混淆——step() 返回 None 会被 UI 当作结束）
+            char.buff_mgr.tick_turn_end()
+            char.buff_mgr.end_turn()
+            self.action_queue.advance()
+            log = ActionLog(
+                av=entry.current_av,
+                total_av=self.total_av,
+                actor_id=char.unit_id,
+                actor_name=char.name,
+                action_type=action.skill_type.value.lower(),
+                sp_after=self.sp.current,
+                energy_after=char.energy,
+                notes="无法施放（技能受限）",
+            )
+            self.logs.append(log)
+            return log
+        skill = resolved
+
         return self._resolve_skill(char, skill, action, entry, is_turn=True)
+
+    def _resolve_skill_override(
+        self,
+        char: CharacterUnit,
+        skill_type: SkillType,
+        skill: Skill,
+    ) -> Skill | None:
+        """技能解析钩子：遍历模块，首个"响应"的模块决定实际技能。
+
+        on_resolve_skill(sim, char, skill_type, skill) 返回：
+        - 原 skill 对象 → 不参与，继续下一个模块
+        - 新 Skill → 替换（如千冶无量忿怒下普攻/终结技强化版）
+        - None → 拒绝施放（如千冶无法施放战技：回合照常消耗，无结算）
+        """
+        for module in self.char_modules.values():
+            fn = getattr(module, "on_resolve_skill", None)
+            if not callable(fn):
+                continue  # 模块未实现该钩子，不参与
+            resolved = fn(self, char, skill_type, skill)
+            if resolved is None:
+                return None  # 模块明确拒绝施放
+            if resolved is not skill:
+                return resolved  # 模块替换技能
+        return skill
 
     def _resolve_skill(
         self,
@@ -613,6 +759,8 @@ class BattleSimulator:
             is_turn: True=正常回合行动（推进队列、回合管理）；
                      False=终结技插队（不推进队列、不管理回合）
         """
+        # 新行动：令牌递增（本行动主伤害与模块追击链共享）
+        self.action_token += 1
         # SP / 能量结算
         if skill.sp_cost > 0:
             self.sp.consume(skill.sp_cost)
@@ -620,13 +768,20 @@ class BattleSimulator:
             self.sp.recover(-skill.sp_cost)
         if skill.energy_cost > 0:
             char.energy = max(0, char.energy - skill.energy_cost)
+        # 行动回复能量（能量恢复效率乘区：回复量 × (1 + energy_regen)）
+        # - 正常回合：真实技能用解析出的回复值（如普攻 20），预设为 0 时回 20
+        # - 终结技插队：仅回复技能自带回能（如不死途 5）；预设终结技无回能则不回
         if is_turn:
-            # 行动回复能量（终结技插队不回复；真实技能用解析出的回复值，预设为 0 时回 20）
-            # 能量恢复效率乘区：回复量 × (1 + energy_regen)
+            recover = skill.energy_recover or 20
+        elif skill.skill_type == SkillType.ULTRA:
+            recover = skill.energy_recover
+        else:
+            recover = 0.0
+        if recover:
             regen = char.final_stats().energy_regen
             char.energy = min(
                 char.base_stats.energy_max,
-                char.energy + (skill.energy_recover or 20) * (1 + regen),
+                char.energy + recover * (1 + regen),
             )
 
         # 目标
@@ -656,6 +811,10 @@ class BattleSimulator:
 
         # 计算伤害
         if target:
+            # 冻结本次行动的分发令牌：模块在 on_attack_hit 内 begin_new_action()
+            # 会修改 sim.action_token（如追打开启新行动），本体命中的去重键
+            # 必须用冻结值，否则会被中途新增的令牌误判为"同行动"
+            hit_token = self.action_token
             for effect in skill.effects:
                 damage = self._calc_skill_damage(char, effect, target)
                 log.damages.append(damage)
@@ -697,9 +856,12 @@ class BattleSimulator:
                 target.buff_mgr.tick_attack()
 
                 # 攻击命中钩子（模块在此判定天赋追加攻击等）
+                # 传冻结的 hit_token：分发循环内模块 begin_new_action 修改
+                # sim.action_token 不影响本次命中的去重键
                 for module in self.char_modules.values():
                     self._dispatch_hook(
-                        module, "on_attack_hit", self, char, skill, target, effect, damage, log
+                        module, "on_attack_hit",
+                        self, char, skill, target, effect, damage, log, hit_token,
                     )
 
         # NEXT_ATTACK 类型 buff 失效
@@ -760,6 +922,8 @@ class BattleSimulator:
             resistance=target.resistance.get(element),
             # 面板增伤已由 attacker_stats.dmg_bonus 带入，此处为技能额外增伤（默认 0）
             dmg_bonus=0.0,
+            # 易伤取自目标（模块增量式维护，如千冶【煞火缠身】受伤+30%）
+            vulnerability=target.vulnerability,
             damage_reductions=damage_reductions,
             defense_ctx=def_ctx,
             is_crit=False,  # 暴击由调用方决定
@@ -814,11 +978,12 @@ class BattleSimulator:
         """按单位 ID 取角色模块实例。"""
         return self.char_modules.get(char.unit_id)
 
-    def _dispatch_hook(self, module: CharacterModule, hook: str, *args: Any) -> None:
-        """分发事件钩子（模块未实现则跳过）。"""
+    def _dispatch_hook(self, module: CharacterModule, hook: str, *args: Any) -> Any:
+        """分发事件钩子（模块未实现则跳过），返回钩子返回值（无实现返回 None）。"""
         fn = getattr(module, hook, None)
         if callable(fn):
-            fn(*args)
+            return fn(*args)
+        return None
 
     # ── 模块可用的公共 API ─────────────────────────────────
 
@@ -829,6 +994,7 @@ class BattleSimulator:
         effect: SkillEffect,
         *,
         skill_type: SkillType = SkillType.FOLLOW_UP,
+        secondary_skill_type: SkillType | None = None,
         log: ActionLog | None = None,
     ) -> float:
         """公共打伤害入口（角色模块用）。
@@ -841,6 +1007,8 @@ class BattleSimulator:
             target: 目标敌人
             effect: 伤害效果段（倍率/削韧/属性）
             skill_type: 本次伤害的技能类型（默认追加攻击）
+            secondary_skill_type: 同时属于的第二种技能类型
+                （如千冶天赋触发的战技：主类型追加攻击，同时是战技）
             log: 要写入的日志（模块自建日志时传入；None 则不记录日志）
         """
         damage = self._calc_skill_damage(attacker, effect, target)
@@ -855,6 +1023,7 @@ class BattleSimulator:
                     damage_type=effect.damage_type,
                     element=effect.element or attacker.element,
                     target_id=target.unit_id,
+                    secondary_skill_type=secondary_skill_type,
                 )
             )
         self.total_damage += damage
@@ -883,10 +1052,14 @@ class BattleSimulator:
                 self.total_damage += break_dmg
 
         # 攻击命中钩子（模块可响应，如天赋追加攻击判定；skill 非模块发起时为 None）
+        # 追加攻击等独立行动使用当前 action_token（begin_new_action 已生效）
         attacker.buff_mgr.tick_attack()
         target.buff_mgr.tick_attack()
         for module in self.char_modules.values():
-            self._dispatch_hook(module, "on_attack_hit", self, attacker, None, target, effect, damage, log)
+            self._dispatch_hook(
+                module, "on_attack_hit",
+                self, attacker, None, target, effect, damage, log, self.action_token,
+            )
 
         return damage
 
@@ -896,17 +1069,19 @@ class BattleSimulator:
         target: EnemyState,
         *,
         notes: str = "",
+        action_type: str = "follow_up",
     ) -> ActionLog:
-        """创建追加攻击日志（不推进队列、不管理回合）。
+        """创建行动日志（不推进队列、不管理回合）。
 
-        action_type="follow_up"，av=0（无行动消耗），记录当前 SP/能量快照。
+        默认 action_type="follow_up"（追加攻击）；秘技等进战效果可传其他类型。
+        av=0（无行动消耗），记录当前 SP/能量快照。
         """
         log = ActionLog(
             av=0,
             total_av=self.total_av,
             actor_id=actor.unit_id,
             actor_name=actor.name,
-            action_type="follow_up",
+            action_type=action_type,
             target_id=target.unit_id,
             sp_after=self.sp.current,
             energy_after=actor.energy,
@@ -915,10 +1090,45 @@ class BattleSimulator:
         self.logs.append(log)
         return log
 
-    def recover_energy(self, char: CharacterUnit, amount: float) -> float:
-        """回复角色能量（能量恢复效率 ×(1+regen)，钳制到能量上限），返回实际回复量。"""
+    def advance_av(self) -> float:
+        """交互模式：手动推进时间到下一个行动者的位置（如 200 → 250）。
+
+        幂等：已推进到当前行动者时再次调用不重复推进。
+        角色释放普攻/战技后时间停在该行动者位置（行动后插队 = 该位置），
+        按推进键后才轮到下个行动者（轮到时插队 = 新位置）。
+
+        Returns: 本次推进的 AV（未推进返回 0）
+        """
+        if not self.action_queue.entries:
+            return 0.0
+        actor = self.action_queue.next_actor()
+        if self.pending_av_actor == actor.unit_id:
+            return 0.0  # 已推进到该行动者
+        self.total_av += actor.current_av
+        self.pending_av_actor = actor.unit_id
+        return actor.current_av
+
+    def begin_new_action(self) -> None:
+        """模块主动开启新行动（行动令牌 +1）。
+
+        用于把后续命中标记为独立行动（如千冶天赋额外施放的战技
+        "视为追加攻击"，是一次新的攻击行动，触发天赋充能计数）。
+        """
+        self.action_token += 1
+
+    def recover_energy(self, char: CharacterUnit, amount: float, *, fixed: bool = False) -> float:
+        """回复角色能量（钳制到能量上限），返回实际回复量。
+
+        Args:
+            amount: 回复量
+            fixed: 固定回能（游戏描述带"固定"字样，如不死途天赋 8 点，
+                   不受能量恢复效率影响）；普通回能 ×(1+energy_regen)
+        """
         before = char.energy
-        actual = amount * (1 + char.final_stats().energy_regen)
+        if fixed:
+            actual = amount
+        else:
+            actual = amount * (1 + char.final_stats().energy_regen)
         char.energy = min(char.base_stats.energy_max, char.energy + actual)
         return char.energy - before
 
@@ -942,7 +1152,34 @@ class BattleSimulator:
             notes="恢复韧性" if enemy.is_broken else "",
         )
         self.logs.append(log)
+
+        # 怪物行动钩子（模块在此做敌方回合计时，如千冶【煞火缠身】剩余回合 -1）
+        for module in self.char_modules.values():
+            self._dispatch_hook(module, "on_enemy_act", self, enemy, log)
+
         self.action_queue.advance()
+
+    def _countdown_act(self, entry: ActionEntry) -> None:
+        """倒计时行动：触发所属角色模块的 on_countdown（结界解除等）后移除。"""
+        owner_id = self.countdown_units.get(entry.unit_id, "")
+        owner = self._get_character(owner_id) if owner_id else None
+
+        log = ActionLog(
+            av=entry.current_av,
+            total_av=self.total_av,
+            actor_id=entry.unit_id,
+            actor_name=entry.name,
+            action_type="countdown",
+            notes="结界解除" if owner is not None else "",
+        )
+        self.logs.append(log)
+
+        if owner is not None:
+            module = self._module_for(owner)
+            self._dispatch_hook(module, "on_countdown", self, owner, log)
+
+        self.action_queue.advance()
+        self._remove_countdown(entry.unit_id)
 
     def _trigger_aha_moment(self) -> None:
         """触发阿哈时刻。"""
