@@ -15,14 +15,14 @@
 - 150402 战技「鞭哨，逐尽恶兽」：#1 首段倍率（1→2）、#3 额外段倍率（0.5→1）、
   #4 敌方全体减防（0.2→0.4）、#5 额外段命中时回战技点（1）
 - 150403 终结技「飨宴，自始无终」：#1 首段倍率（2→4）、#2 获得充能（3）、
-  #3 婪酣消耗层数（4）、#4 强化追打/额外段倍率（1→2）
+  #3 婪酣消耗层数（4）、#4 强化追击/额外段倍率（1→2）
 - 150404 天赋「宿怨，切齿奉还」：#1 初始充能（2）、#2 充能上限（3）、
-  #3 追打消耗充能（1）、#4 追打倍率（1→2）、#5 获得婪酣（2）、
+  #3 追击消耗充能（1）、#4 追击倍率（1→2）、#5 获得婪酣（2）、
   #6 婪酣上限（12）、#7 回能量（8）
 - 150407 秘技：战前机制，不建模
 
 未建模（TODO，因模拟器暂无敌人 HP/死亡模型）：
-- 终结技强化追打"致命攻击转移"（击杀饲饵后转移到新饲饵继续打）
+- 终结技强化追击"致命攻击转移"（击杀饲饵后转移到新饲饵继续打）
 - 战技"当前生命最低的敌方单体"选取（暂用 enemies[0] 占位）
 """
 
@@ -68,7 +68,7 @@ class AshveilModule(CharacterModule):
     # 与千冶【煞火缠身】等其余模块的减防贡献共存）
     def_reduce_contribution: float = 0.0
     # 最近已处理天赋的受击行动令牌（按行动计：一次攻击行动的多段命中
-    # 只触发一次"固定回 8 能量 + 追打判定"，避免战技 5 段回 5 次）
+    # 只触发一次"固定回 8 能量 + 追击判定"，避免战技 5 段回 5 次）
     _last_proc_token: int | None = None
 
     # ── 事件钩子 ─────────────────────────────────────────
@@ -156,11 +156,11 @@ class AshveilModule(CharacterModule):
         self.charge = min(self.charge + module_params(ultra, 2, 3), charge_max)
 
         # 终结技后的追击链视为一次独立攻击行动（开启新行动令牌）：
-        # 终结技本体命中算 1 次攻击，强化追打 + 婪酣追打整体算 1 次攻击
+        # 终结技本体命中算 1 次攻击，强化追击 + 婪酣追击整体算 1 次攻击
         sim.begin_new_action()
 
         # 强化天赋追加攻击（不消耗充能），倍率 = 终结技 #4
-        # 基础的一次强化追打有追加攻击回能（天赋 sp_base=5）
+        # 基础的一次强化追击有追加攻击回能（天赋 sp_base=5）
         mult = module_params(ultra, 4, 1.0)
         follow_up_recover = talent.energy_recover
         self._follow_up_attack(
@@ -174,7 +174,7 @@ class AshveilModule(CharacterModule):
             self.greed -= greed_cost
             self._follow_up_attack(sim, char, target, mult, notes="婪酣追击", energy_recover=0)
         # TODO: 致命攻击转移未建模（需敌人 HP/死亡模型）：
-        #   追打击杀饲饵后应转移到新饲饵继续打，直至婪酣 < #3 层。
+        #   追击击杀饲饵后应转移到新饲饵继续打，直至婪酣 < #3 层。
 
     # ── 私有辅助 ─────────────────────────────────────────
 
@@ -260,24 +260,24 @@ class AshveilModule(CharacterModule):
             enemy.def_reduce += diff
 
     def _talent_follow_up(self, sim: BattleSimulator, char: CharacterUnit) -> None:
-        """天赋（受到攻击后）：固定回能 → 充能足够时追打（独立行动）。
+        """天赋（受到攻击后）：固定回能 → 充能足够时追击（独立行动）。
 
         由 on_attack_hit 按行动去重后调用（战技 5 段命中只触发一次）。
-        固定回能 #7 与充能无关（充能不足时追打不触发，回能照常）。
+        固定回能 #7 与充能无关（充能不足时追击不触发，回能照常）。
         """
         talent = get_skill_by_type(char.skills, SkillType.TALENT)
         if talent is None:
             return
         # 固定回能量（#7，8 点）：描述带"固定"字样，不受能量恢复效率影响
         sim.recover_energy(char, module_params(talent, 7, 0), fixed=True)
-        # 充能不足则不追打（回能 8 已发生；追打是"额外施放"）
+        # 充能不足则不追击（回能 8 已发生；追击是"额外施放"）
         charge_cost = module_params(talent, 3, 1)
         if self.charge < charge_cost:
             return
         self.charge -= charge_cost
-        # 天赋追打是独立攻击行动（与触发它的那次攻击分开计数）
+        # 天赋追击是独立攻击行动（与触发它的那次攻击分开计数）
         sim.begin_new_action()
-        # 追打伤害（#4 倍率）；天赋追加攻击有追加攻击回能（天赋 sp_base=5）
+        # 追击伤害（#4 倍率）；天赋追加攻击有追加攻击回能（天赋 sp_base=5）
         mult = module_params(talent, 4, 0.0)
         if mult:
             self._follow_up_attack(
@@ -306,7 +306,7 @@ class AshveilModule(CharacterModule):
     ) -> None:
         """打一段追加攻击（独立日志，不推进队列）。
 
-        energy_recover: 本次追打的能量回复（追加攻击回能 5；婪酣额外段为 0）。
+        energy_recover: 本次追击的能量回复（追加攻击回能 5；婪酣额外段为 0）。
         """
         if target is None or multiplier <= 0:
             return
@@ -314,7 +314,7 @@ class AshveilModule(CharacterModule):
         effect = SkillEffect(
             damage_type=DamageType.NORMAL,
             multiplier=multiplier,
-            # TODO: 追加攻击削韧数据待勘探（天赋追打 15，强化追打未单独给出）
+            # TODO: 追加攻击削韧数据待勘探（天赋追击 15，强化追击未单独给出）
             toughness_damage=0,
             element=ELEMENT,
         )

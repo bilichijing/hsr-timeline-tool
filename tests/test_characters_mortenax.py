@@ -583,10 +583,10 @@ class TestTeamwork:
         assert sim.logs[-1].total_damage > 0
 
     def test_trigger_and_follow_up_both_charged_when_ashveil_first(self):
-        """不死途在队伍前（分发顺序 ash 先）：触发攻击与追打各自计费，合计 2 层。
+        """不死途在队伍前（分发顺序 ash 先）：触发攻击与追击各自计费，合计 2 层。
 
         回归：分发循环内不死途 begin_new_action 修改全局 action_token，
-        千冶若读全局令牌会把本体命中误判为与追打同一行动（只计 1 层）。
+        千冶若读全局令牌会把本体命中误判为与追击同一行动（只计 1 层）。
         """
         from test_characters_ashveil import _ashveil_skills_raw
 
@@ -612,15 +612,15 @@ class TestTeamwork:
         # 千冶（200 速）先开结界并冻结倒计时
         sim.step(PlayerAction(unit_id="mortenax", skill_type=SkillType.ULTRA, target_id="e1"))
         _freeze_countdown(sim)
-        # 角色 D（150 速，开结界后剩 16.7 AV）战技 → 触发不死途天赋追打
+        # 角色 D（150 速，开结界后剩 16.7 AV）战技 → 触发不死途天赋追击
         sim.step(PlayerAction(unit_id="mate", skill_type=SkillType.SKILL, target_id="e1"))
         fu = [l for l in sim.logs if l.action_type == "follow_up"]
         assert fu and "天赋追击" in fu[-1].notes
-        # 角色 D 战技 1 层 + 追打 1 层 = 2 层
+        # 角色 D 战技 1 层 + 追击 1 层 = 2 层
         assert _module(sim).charge == pytest.approx(2)
 
     def test_skill_chain_log_order_and_energy(self):
-        """千冶战技连锁（战技→追打→追加战技）：日志顺序、充能 1/9、不死途能量按行动计。
+        """千冶战技连锁（战技→追击→追加战技）：日志顺序、充能 1/9、不死途能量按行动计。
 
         回归：
         - 战技额外段在 on_skill_end 打出（主日志先入列）→ 日志顺序正确
@@ -651,16 +651,16 @@ class TestTeamwork:
         ash.charge = 1
         char2.energy = 66
         _act(sim, SkillType.SKILL)
-        # 日志顺序：战技 → 不死途追打 → 千冶追加战技
+        # 日志顺序：战技 → 不死途追击 → 千冶追加战技
         tail = [(l.action_type, l.actor_id) for l in sim.logs[-3:]]
         assert tail == [
             ("skill", "mortenax"),
             ("follow_up", "ash"),
             ("follow_up", "mortenax"),
         ]
-        # 千冶充能：7→8（战技）→9（追打）→0（天赋消耗）→1（追加战技）
+        # 千冶充能：7→8（战技）→9（追击）→0（天赋消耗）→1（追加战技）
         assert mod.charge == pytest.approx(1)
-        # 不死途能量：66 + 8（战技受击）+ 5（追打回能，测试面板无能量恢复效率）+ 8（追加战技受击）
+        # 不死途能量：66 + 8（战技受击）+ 5（追击回能，测试面板无能量恢复效率）+ 8（追加战技受击）
         assert char2.energy == pytest.approx(66 + 8 + 5 + 8, abs=0.01)
         # 不死途圆点耗尽
         assert ash.charge == pytest.approx(0)
@@ -693,22 +693,22 @@ class TestTeamwork:
         assert _module(sim).rage is True
         _freeze_countdown(sim)
         sim.step(PlayerAction(unit_id="mortenax", skill_type=SkillType.NORMAL, target_id="e1"))
-        # 不死途：攒满婪酣（8 层 → 2 段婪酣追打）与能量
+        # 不死途：攒满婪酣（8 层 → 2 段婪酣追击）与能量
         ash_mod = sim.char_modules["ash"]
         ash_mod.greed = 8
         char2.energy = 150
-        # 终结技：本体命中 + 强化追打 + 2 段婪酣追打 = 3 个追加日志、4 次命中
+        # 终结技：本体命中 + 强化追击 + 2 段婪酣追击 = 3 个追加日志、4 次命中
         sim.step(PlayerAction(unit_id="ash", skill_type=SkillType.ULTRA, target_id="e1"))
         assert sim.logs[-1].actor_id == "ash"
         fu = [l for l in sim.logs if l.action_type == "follow_up"]
-        # 终结技追击链：强化追打 + 2 段婪酣追打（千冶普攻还触发了 1 次天赋追打，另行统计）
+        # 终结技追击链：强化追击 + 2 段婪酣追击（千冶普攻还触发了 1 次天赋追击，另行统计）
         ultra_fu = [l for l in fu if "强化追击" in l.notes or "婪酣追击" in l.notes]
         assert len(ultra_fu) == 3
-        # 千冶普攻 1 + 天赋追打 1 + 终结技本体 1 + 追击链整体 1 = 4 层充能
+        # 千冶普攻 1 + 天赋追击 1 + 终结技本体 1 + 追击链整体 1 = 4 层充能
         assert _module(sim).charge == pytest.approx(4)
 
     def test_ashveil_talent_follow_up_is_separate_action(self):
-        """不死途天赋追打是独立攻击：触发攻击 + 天赋追打 = 2 层充能。"""
+        """不死途天赋追击是独立攻击：触发攻击 + 天赋追击 = 2 层充能。"""
         from test_characters_ashveil import _ashveil_skills_raw
 
         char1 = _make_mortenax()  # 千冶（提速先行动）
@@ -726,11 +726,11 @@ class TestTeamwork:
         sim.setup()
         sim.step(PlayerAction(unit_id="mortenax", skill_type=SkillType.ULTRA, target_id="e1"))
         _freeze_countdown(sim)
-        # 千冶攻击饲饵（不死途战斗开始自动标记）→ 触发不死途天赋追打
+        # 千冶攻击饲饵（不死途战斗开始自动标记）→ 触发不死途天赋追击
         sim.step(PlayerAction(unit_id="mortenax", skill_type=SkillType.NORMAL, target_id="e1"))
         fu = [l for l in sim.logs if l.action_type == "follow_up"]
         assert fu and "天赋追击" in fu[-1].notes
-        # 千冶攻击 1 层 + 不死途天赋追打 1 层 = 2 层
+        # 千冶攻击 1 层 + 不死途天赋追击 1 层 = 2 层
         assert _module(sim).charge == pytest.approx(2)
 
 

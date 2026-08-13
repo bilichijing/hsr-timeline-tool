@@ -55,6 +55,7 @@ class SkillType(Enum):
     TECHNIQUE = "Technique"    # 秘技
     MEMO_DNSKILL = "MemoDNSkill"  # 忆灵技能
     FOLLOW_UP = "FollowUp"     # 追加攻击（可造成任何伤害类型）
+    ADDED = "Added"            # 附加伤害（独立攻击类型，不属于普攻/战技/终结技/追加攻击）
 
 
 # 新版 type 字段 → 技能类型

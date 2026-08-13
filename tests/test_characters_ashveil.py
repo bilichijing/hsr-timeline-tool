@@ -312,7 +312,7 @@ class TestTalentTrigger:
         assert all(l.action_type != "follow_up" for l in sim.logs)
 
     def test_own_attack_on_bait_does_not_trigger(self):
-        """防自激：不死途自己的攻击（含追打自身）不触发天赋（无 8 点固定回能）。"""
+        """防自激：不死途自己的攻击（含追击自身）不触发天赋（无 8 点固定回能）。"""
         sim = _make_battle()
         module = sim.char_modules["ashveil"]
         self._setup_bait(sim)
@@ -337,7 +337,7 @@ class TestTalentTrigger:
 
         _allied_attack(sim, "mate", "enemy_a")
 
-        # 只回能，不追打
+        # 只回能，不追击
         assert ash.energy - energy_before == 8
         assert all(l.action_type != "follow_up" for l in sim.logs)
 
@@ -386,7 +386,7 @@ class TestUltraChain:
         # 终结技首段（L10 倍率 4.0）：饲饵先标记 → 敌方减防 0.4 已生效
         # 伤害 = 1000 × 4.0 × 未击破减伤 0.9 × 防御系数（80级 vs 80级 + 减防0.4）
         assert log.damages[0] == pytest.approx(1000 * 4.0 * 0.9 * 100 / 160)
-        # 耗能 150 后：终结技回能 5（sp_base）+ 强化追打回能 5（天赋 sp_base）= 10
+        # 耗能 150 后：终结技回能 5（sp_base）+ 强化追击回能 5（天赋 sp_base）= 10
         assert ash.energy == pytest.approx(10.0)
 
     def test_ultra_gives_charge_capped(self):
@@ -409,7 +409,7 @@ class TestUltraChain:
         sim.execute_ultra(0)
 
         follow_ups = [l for l in sim.logs if l.action_type == "follow_up"]
-        assert len(follow_ups) == 1  # 仅免费强化追打
+        assert len(follow_ups) == 1  # 仅免费强化追击
         assert module.charge == 3    # 未消耗充能
 
     def test_ultra_consumes_greed_per_4(self):
@@ -420,7 +420,7 @@ class TestUltraChain:
 
         sim.execute_ultra(0)
 
-        # 免费 1 段 + 消耗 4 层额外 1 段 = 2 段追打
+        # 免费 1 段 + 消耗 4 层额外 1 段 = 2 段追击
         follow_ups = [l for l in sim.logs if l.action_type == "follow_up"]
         assert len(follow_ups) == 2
         assert module.greed == 0
@@ -451,7 +451,7 @@ class TestUltraChain:
         assert module.greed == 3
 
     def test_ultra_greed_strikes_no_energy(self):
-        """婪酣额外攻击不提供追加攻击回能：仅终结技 5 + 免费强化追打 5 = 10。"""
+        """婪酣额外攻击不提供追加攻击回能：仅终结技 5 + 免费强化追击 5 = 10。"""
         sim = _make_battle()
         module = self._prepare(sim, greed=8)  # 2 段额外攻击
         ash = sim.characters[0]

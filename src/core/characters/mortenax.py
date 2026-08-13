@@ -89,7 +89,7 @@ class MortenaxModule(CharacterModule):
     # 【煞火缠身】状态：{enemy_unit_id: (剩余敌方回合, 减防贡献, 易伤贡献)}
     blaze: dict[str, tuple[float, float, float]] = {}
     # 已计充能的行动令牌集合（同一次行动的多次命中只计 1 点充能）。
-    # 用集合而非单值：连锁触发（追打/追加战技 begin_new_action）后令牌交替
+    # 用集合而非单值：连锁触发（追击/追加战技 begin_new_action）后令牌交替
     # （T、T+1、T+2），单值无法去重"较早令牌"的后续命中（会重复计费）。
     _charged_tokens: set[int] = set()
     # 【百炼骨】能量恢复比例（on_battle_start 时从行迹额外能力读取）
@@ -175,7 +175,7 @@ class MortenaxModule(CharacterModule):
         独立计数（如千冶天赋额外施放的战技）。
         注意：用分发时冻结的 action_token（非 sim.action_token）——
         分发循环内其他模块 begin_new_action 会修改全局令牌，导致本体命中
-        被误判为与追打同一行动。
+        被误判为与追击同一行动。
         """
         if not self.rage:
             return
@@ -207,7 +207,7 @@ class MortenaxModule(CharacterModule):
         """技能结算后：战技额外 #2 次随机单体伤害（#3 倍率）。
 
         放在 on_skill_end（主日志已入列、首段伤害已结算）而非 on_skill_cast，
-        保证日志顺序与连锁顺序正确：战技 → 追打 → 追加战技。
+        保证日志顺序与连锁顺序正确：战技 → 追击 → 追加战技。
         """
         if str(skill.id) != SKILL_SKILL:
             return

@@ -264,7 +264,7 @@ class BattleSimulator:
     # 行动令牌：每次技能施放（_resolve_skill）递增。
     # 一次行动内的所有命中（主伤害 + 模块 on_skill_end 追击链）共享同一令牌，
     # 供模块按"行动"粒度去重（如千冶天赋"每次攻击 +1 充能"——不死途终结技
-    # 后的强化追打/婪酣追打链整体视为一次行动）。模块可用 begin_new_action()
+    # 后的强化追击/婪酣追击链整体视为一次行动）。模块可用 begin_new_action()
     # 主动开启新行动（如千冶天赋额外施放的战技为独立行动）。
     action_token: int = 0
 
@@ -678,6 +678,9 @@ class BattleSimulator:
         # 回合开始
         char.buff_mgr.begin_turn()
         char.buff_mgr.tick_turn_start()
+        # 回合开始钩子（模块在此做自身回合计时，如缇宝结界剩余回合 -1）
+        for module in self.char_modules.values():
+            self._dispatch_hook(module, "on_turn_start", self, char)
 
         # 获取技能
         skill: Skill | None = None
@@ -812,7 +815,7 @@ class BattleSimulator:
         # 计算伤害
         if target:
             # 冻结本次行动的分发令牌：模块在 on_attack_hit 内 begin_new_action()
-            # 会修改 sim.action_token（如追打开启新行动），本体命中的去重键
+            # 会修改 sim.action_token（如追击开启新行动），本体命中的去重键
             # 必须用冻结值，否则会被中途新增的令牌误判为"同行动"
             hit_token = self.action_token
             for effect in skill.effects:
@@ -920,6 +923,8 @@ class BattleSimulator:
             is_weakness=is_weakness,
             is_broken=target.is_broken,
             resistance=target.resistance.get(element),
+            # 全属性抗性穿透（来自角色 buff，如缇宝【神启】）
+            res_pen=stats.res_pen,
             # 面板增伤已由 attacker_stats.dmg_bonus 带入，此处为技能额外增伤（默认 0）
             dmg_bonus=0.0,
             # 易伤取自目标（模块增量式维护，如千冶【煞火缠身】受伤+30%）
@@ -996,6 +1001,7 @@ class BattleSimulator:
         skill_type: SkillType = SkillType.FOLLOW_UP,
         secondary_skill_type: SkillType | None = None,
         log: ActionLog | None = None,
+        is_attack: bool = True,
     ) -> float:
         """公共打伤害入口（角色模块用）。
 
@@ -1010,6 +1016,10 @@ class BattleSimulator:
             secondary_skill_type: 同时属于的第二种技能类型
                 （如千冶天赋触发的战技：主类型追加攻击，同时是战技）
             log: 要写入的日志（模块自建日志时传入；None 则不记录日志）
+            is_attack: 本次伤害是否算作一次"攻击命中"。False=非攻击伤害
+                （如缇宝结界附加伤害）：不触发 on_attack_hit 钩子与
+                NEXT_ATTACK buff tick——"攻击后"系效果（不死途天赋、
+                千冶充能等）不应被附加伤害触发（附加伤害 ≠ 攻击）
         """
         damage = self._calc_skill_damage(attacker, effect, target)
 
@@ -1053,13 +1063,14 @@ class BattleSimulator:
 
         # 攻击命中钩子（模块可响应，如天赋追加攻击判定；skill 非模块发起时为 None）
         # 追加攻击等独立行动使用当前 action_token（begin_new_action 已生效）
-        attacker.buff_mgr.tick_attack()
-        target.buff_mgr.tick_attack()
-        for module in self.char_modules.values():
-            self._dispatch_hook(
-                module, "on_attack_hit",
-                self, attacker, None, target, effect, damage, log, self.action_token,
-            )
+        if is_attack:
+            attacker.buff_mgr.tick_attack()
+            target.buff_mgr.tick_attack()
+            for module in self.char_modules.values():
+                self._dispatch_hook(
+                    module, "on_attack_hit",
+                    self, attacker, None, target, effect, damage, log, self.action_token,
+                )
 
         return damage
 

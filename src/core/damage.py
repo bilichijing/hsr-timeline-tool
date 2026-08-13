@@ -89,6 +89,7 @@ class DamageContext:
     is_weakness: bool = True        # 是否弱点击中
     is_broken: bool = True          # 目标是否处于击破状态
     resistance: float | None = None  # 显式抗性（None 则按弱点推断）
+    res_pen: float = 0.0             # 全属性抗性穿透（最终抗性 = 抗性 - 穿透）
 
     # 各乘区加成（默认 0）
     dmg_bonus: float = 0.0          # 增伤
@@ -123,13 +124,14 @@ class DamageContext:
 def calc_resistance(ctx: DamageContext) -> float:
     """计算抗性系数 = 1 - 抗性。
 
-    抗性范围钳制在 [-100%, 90%]。
+    最终抗性 = 抗性 - 抗性穿透，范围钳制在 [-100%, 90%]。
     未显式指定时：弱点 0%，非弱点 20%。
     """
     if ctx.resistance is not None:
         res = ctx.resistance
     else:
         res = DEFAULT_RESISTANCE_WEAK if ctx.is_weakness else DEFAULT_RESISTANCE_NON_WEAK
+    res = res - ctx.res_pen
     res = max(RESISTANCE_MIN, min(RESISTANCE_MAX, res))
     return 1 - res
 
