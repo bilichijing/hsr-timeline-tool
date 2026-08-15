@@ -120,6 +120,8 @@ def build_character_unit(
     lightcone_rank: int = 1,
     lightcone_params: list[float] | None = None,
     lightcone_name: str = "",
+    relic_set_counts: dict[str, int] | None = None,
+    relic_set_effects: dict[str, dict] | None = None,
 ) -> CharacterUnit:
     """构造带真实技能与面板的角色单位。
 
@@ -144,6 +146,8 @@ def build_character_unit(
         lightcone_rank: 光锥叠影等级 1~5
         lightcone_params: 当前叠影参数列表
         lightcone_name: 光锥名（展示）
+        relic_set_counts: 遗器套装件数 {套装ID: 件数}
+        relic_set_effects: 遗器套装参数 {套装ID: {"2": [...], "4": [...]}}
     """
     base = convert_stats80(stats80)
     base.energy_max = float(sp_need) if sp_need > 0 else 100.0
@@ -180,4 +184,6 @@ def build_character_unit(
         lightcone_rank=lightcone_rank,
         lightcone_params=list(lightcone_params or []),
         lightcone_name=lightcone_name,
+        relic_set_counts=dict(relic_set_counts or {}),
+        relic_set_effects={k: dict(v) for k, v in (relic_set_effects or {}).items()},
     )

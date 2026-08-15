@@ -57,6 +57,8 @@ class BaseStats:
     laugh_bonus: float = 0.0      # 增笑
     laugh_point: float = 0.0      # 笑点
     good_joke: float = 0.0        # 好活当赏
+    follow_up_dmg_bonus: float = 0.0  # 追加攻击伤害提高（遗器等）
+    elemental_dmg_bonus: dict[str, float] = field(default_factory=dict)  # 分属性增伤
 
 
 @dataclass
@@ -96,21 +98,32 @@ class StatBonus:
     laugh_bonus: float = 0.0
     laugh_point: float = 0.0
     good_joke: float = 0.0
+    follow_up_dmg_bonus: float = 0.0  # 追加攻击伤害提高
+    elemental_dmg_bonus: dict[str, float] = field(default_factory=dict)  # 分属性增伤
 
     def add(self, other: StatBonus) -> StatBonus:
         """合并两个加成（对应多个 buff 叠加）。"""
-        return StatBonus(
-            **{
-                k: getattr(self, k) + getattr(other, k)
-                for k in self.__dataclass_fields__
-            }
-        )
+        result = StatBonus()
+        for k in self.__dataclass_fields__:
+            if k == "elemental_dmg_bonus":
+                merged = dict(getattr(self, k))
+                for element, value in getattr(other, k).items():
+                    merged[element] = merged.get(element, 0.0) + value
+                setattr(result, k, merged)
+            else:
+                setattr(result, k, getattr(self, k) + getattr(other, k))
+        return result
 
     def scale(self, factor: float) -> StatBonus:
         """整体缩放（如叠影层级）。"""
-        return StatBonus(
-            **{k: getattr(self, k) * factor for k in self.__dataclass_fields__}
-        )
+        result = StatBonus()
+        for k in self.__dataclass_fields__:
+            value = getattr(self, k)
+            if k == "elemental_dmg_bonus":
+                setattr(result, k, {e: v * factor for e, v in value.items()})
+            else:
+                setattr(result, k, value * factor)
+        return result
 
 
 @dataclass
@@ -140,6 +153,8 @@ class FinalStats:
     outgoing_heal: float = 0.0     # 治疗量加成（小数；模拟器暂无治疗模型）
     incoming_heal: float = 0.0     # 受到治疗提高（小数；治疗模型接入时使用）
     res_pen: float = 0.0           # 全属性抗性穿透（小数）
+    follow_up_dmg_bonus: float = 0.0  # 追加攻击伤害提高
+    elemental_dmg_bonus: dict[str, float] = field(default_factory=dict)  # 分属性增伤
 
 
 @dataclass
@@ -176,6 +191,8 @@ class StatCalculator:
             outgoing_heal=b.outgoing_heal + s.outgoing_heal,
             incoming_heal=b.incoming_heal + s.incoming_heal,
             res_pen=b.res_pen + s.res_pen,
+            follow_up_dmg_bonus=b.follow_up_dmg_bonus + s.follow_up_dmg_bonus,
+            elemental_dmg_bonus=dict(s.elemental_dmg_bonus),
             energy_max=b.energy_max,
             aggro=b.aggro,
             elation_dmg=b.elation_dmg + s.elation_dmg,

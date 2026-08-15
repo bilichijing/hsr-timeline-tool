@@ -67,6 +67,8 @@ class Buff:
     current_stacks: int = 1              # 当前层数
     # 是否为负面效果（debuff）。千冶【百炼骨】“解除自身所有负面效果”使用。
     is_debuff: bool = False
+    # 特殊属性补充：stat=="elemental_dmg_bonus" 时指定属性（"Wind" 等）
+    element: str = ""
     # TURNS_SELF_END 特殊规则标志：
     # 若本 buff 是在自身回合内获得的，则获得它的这个回合结束时
     # 持续时间不会减少（首次 tick_turn_end 跳过扣减）。
@@ -75,7 +77,9 @@ class Buff:
     def to_bonus(self) -> StatBonus:
         """转换为 StatBonus（单层）。"""
         bonus = StatBonus()
-        if hasattr(bonus, self.stat):
+        if self.stat == "elemental_dmg_bonus":
+            bonus.elemental_dmg_bonus[self.element or "All"] = self.value * self.current_stacks
+        elif hasattr(bonus, self.stat):
             setattr(bonus, self.stat, self.value * self.current_stacks)
         return bonus
 

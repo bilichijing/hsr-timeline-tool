@@ -137,6 +137,8 @@ class CharacterUnit:
     lightcone_rank: int = 1            # 光锥叠影等级 1~5
     lightcone_params: list[float] = field(default_factory=list)  # 当前叠影参数
     lightcone_name: str = ""           # 装备光锥名称（展示用）
+    relic_set_counts: dict[str, int] = field(default_factory=dict)  # {遗器套装ID: 件数}
+    relic_set_effects: dict[str, dict] = field(default_factory=dict)  # {套装ID: {"2": [...], "4": [...]}}
 
     def __post_init__(self) -> None:
         self.buff_mgr.unit_id = self.unit_id
@@ -147,13 +149,8 @@ class CharacterUnit:
         buff_bonus = self.buff_mgr.total_bonus()
         # 好活当赏累加：从所有 TURNS_SELF_END 类型的好活当赏 buff 取 value 之和
         good_joke_total = self._sum_good_joke()
-        bonus = StatBonus(
-            **{
-                **{k: getattr(self.bonus_stats, k) + getattr(buff_bonus, k)
-                   for k in buff_bonus.__dataclass_fields__},
-                "good_joke": good_joke_total,
-            }
-        )
+        bonus = self.bonus_stats.add(buff_bonus)
+        bonus.good_joke = good_joke_total
         calc = StatCalculator(base=self.base_stats, bonus=bonus)
         final = calc.final()
         # 笑点是动态资源，直接覆盖
@@ -291,6 +288,8 @@ class BattleSimulator:
     char_modules: dict[str, CharacterModule] = field(default_factory=dict)
     # 光锥效果模块（装备者 unit_id → 模块实例），由 setup() 按 char.lightcone_id 挂载
     lightcone_modules: dict[str, Any] = field(default_factory=dict)
+    # 遗器套装效果模块（装备者 unit_id → 模块列表）
+    relic_modules: dict[str, list[Any]] = field(default_factory=dict)
     # advance_av() 已推进到的行动者（手动推进键幂等标记；交互模式用）
     pending_av_actor: str | None = None
     # 行动条倒计时单位（倒计时 unit_id → 所属角色 unit_id）
@@ -382,6 +381,8 @@ class BattleSimulator:
         self._init_char_modules()
         # 光锥效果模块挂载（按 char.lightcone_id 查注册表）
         self._init_lightcone_modules()
+        # 遗器套装效果模块挂载
+        self._init_relic_modules()
         self.pending_av_actor = None
 
     def _grant_laugh_point(self, amount: float) -> None:
@@ -680,6 +681,7 @@ class BattleSimulator:
             "aha_entry": copy.deepcopy(self.aha_entry),
             "char_modules": copy.deepcopy(self.char_modules),
             "lightcone_modules": copy.deepcopy(self.lightcone_modules),
+            "relic_modules": copy.deepcopy(self.relic_modules),
             "pending_av_actor": self.pending_av_actor,
             "countdown_units": dict(self.countdown_units),
             "action_token": self.action_token,
@@ -700,6 +702,7 @@ class BattleSimulator:
         self.aha_entry = copy.deepcopy(snap["aha_entry"])
         self.char_modules = copy.deepcopy(snap.get("char_modules", {}))
         self.lightcone_modules = copy.deepcopy(snap.get("lightcone_modules", {}))
+        self.relic_modules = copy.deepcopy(snap.get("relic_modules", {}))
         self.pending_av_actor = snap.get("pending_av_actor")
         self.countdown_units = dict(snap.get("countdown_units", {}))
         self.action_token = snap.get("action_token", 0)
@@ -776,6 +779,8 @@ class BattleSimulator:
         lc_module = self.lightcone_modules.get(char.unit_id)
         if lc_module is not None:
             self._dispatch_lightcone_hook(lc_module, "on_turn_start", self, char)
+        for relic_module in self.relic_modules.get(char.unit_id, []):
+            self._dispatch_relic_hook(relic_module, "on_turn_start", self, char)
 
         # 获取技能
         skill: Skill | None = None
@@ -790,6 +795,8 @@ class BattleSimulator:
             lc_module = self.lightcone_modules.get(char.unit_id)
             if lc_module is not None:
                 self._dispatch_lightcone_hook(lc_module, "on_turn_end", self, char)
+            for relic_module in self.relic_modules.get(char.unit_id, []):
+                self._dispatch_relic_hook(relic_module, "on_turn_end", self, char)
             self.action_queue.advance()
             return None
 
@@ -804,6 +811,8 @@ class BattleSimulator:
             lc_module = self.lightcone_modules.get(char.unit_id)
             if lc_module is not None:
                 self._dispatch_lightcone_hook(lc_module, "on_turn_end", self, char)
+            for relic_module in self.relic_modules.get(char.unit_id, []):
+                self._dispatch_relic_hook(relic_module, "on_turn_end", self, char)
             self.action_queue.advance()
             log = ActionLog(
                 av=entry.current_av,
@@ -917,6 +926,10 @@ class BattleSimulator:
             self._dispatch_lightcone_hook(
                 lc_module, "on_skill_cast", self, char, skill, action, target, log,
             )
+        for relic_module in self.relic_modules.get(char.unit_id, []):
+            self._dispatch_relic_hook(
+                relic_module, "on_skill_cast", self, char, skill, action, target, log,
+            )
 
         # 主日志先入列：模块在 on_attack_hit / on_skill_end 中创建的追加攻击日志
         # 自然排在本行动之后（damages 等字段仍可继续写入，列表是引用）
@@ -931,7 +944,7 @@ class BattleSimulator:
             for effect in skill.effects:
                 if target.is_dead:
                     break  # 目标已死亡离场，跳过后续段
-                damage = self._calc_skill_damage(char, effect, target)
+                damage = self._calc_skill_damage(char, effect, target, None, skill.skill_type)
                 log.damages.append(damage)
                 log.total_damage += damage
                 log.damage_records.append(
@@ -994,6 +1007,12 @@ class BattleSimulator:
                         self, char, char, skill.skill_type,
                         target, effect, damage, log, hit_token,
                     )
+                for relic_module in self.relic_modules.get(char.unit_id, []):
+                    self._dispatch_relic_hook(
+                        relic_module, "on_attack_hit",
+                        self, char, char, skill.skill_type,
+                        target, effect, damage, log, hit_token,
+                    )
 
         # NEXT_ATTACK 类型 buff 失效
         char.buff_mgr.tick_attack()
@@ -1005,6 +1024,8 @@ class BattleSimulator:
             lc_module = self.lightcone_modules.get(char.unit_id)
             if lc_module is not None:
                 self._dispatch_lightcone_hook(lc_module, "on_turn_end", self, char)
+            for relic_module in self.relic_modules.get(char.unit_id, []):
+                self._dispatch_relic_hook(relic_module, "on_turn_end", self, char)
 
         # 技能结算钩子（模块在此触发终结技强化链等；其创建的追加攻击日志排在本日志之后）
         for module in self.char_modules.values():
@@ -1013,6 +1034,10 @@ class BattleSimulator:
         if lc_module is not None:
             self._dispatch_lightcone_hook(
                 lc_module, "on_skill_end", self, char, skill, action, target, log,
+            )
+        for relic_module in self.relic_modules.get(char.unit_id, []):
+            self._dispatch_relic_hook(
+                relic_module, "on_skill_end", self, char, skill, action, target, log,
             )
 
         # 技能收尾钩子（在所有模块 on_skill_end 之后分发，顺序无关）：
@@ -1023,6 +1048,10 @@ class BattleSimulator:
         if lc_module is not None:
             self._dispatch_lightcone_hook(
                 lc_module, "on_post_skill", self, char, skill, action, target, log,
+            )
+        for relic_module in self.relic_modules.get(char.unit_id, []):
+            self._dispatch_relic_hook(
+                relic_module, "on_post_skill", self, char, skill, action, target, log,
             )
 
         if is_turn:
@@ -1036,6 +1065,7 @@ class BattleSimulator:
         effect: SkillEffect,
         target: EnemyState,
         stats: FinalStats | None = None,
+        skill_type: SkillType | None = None,
     ) -> float:
         """计算技能单段伤害。stats 为属性快照（None 用当前面板）。"""
         if stats is None:
@@ -1063,6 +1093,11 @@ class BattleSimulator:
         damage_reductions: list[float] = []
         # 此处可从 target.buff_mgr 提取减伤 buff
 
+        # 分属性增伤 + 追加攻击增伤（遗器套装等）
+        extra_dmg_bonus = stats.elemental_dmg_bonus.get(element, 0.0)
+        if skill_type == SkillType.FOLLOW_UP:
+            extra_dmg_bonus += stats.follow_up_dmg_bonus
+
         ctx = DamageContext(
             damage_type=effect.damage_type,
             element=element,
@@ -1073,8 +1108,8 @@ class BattleSimulator:
             resistance=target.resistance.get(element),
             # 全属性抗性穿透（来自角色 buff，如缇宝【神启】）
             res_pen=stats.res_pen,
-            # 面板增伤已由 attacker_stats.dmg_bonus 带入，此处为技能额外增伤（默认 0）
-            dmg_bonus=0.0,
+            # 面板增伤已由 attacker_stats.dmg_bonus 带入，此处为技能/属性额外增伤
+            dmg_bonus=extra_dmg_bonus,
             # 易伤取自目标（模块增量式维护，如千冶【煞火缠身】受伤+30%）
             vulnerability=target.vulnerability,
             damage_reductions=damage_reductions,
@@ -1152,6 +1187,32 @@ class BattleSimulator:
             return None
         return fn(*args)
 
+    def _init_relic_modules(self) -> None:
+        """按角色装备的遗器套装 ID 实例化套装模块。"""
+        from .relics import get_module_cls as get_relic_module_cls
+
+        self.relic_modules = {}
+        for char in self.characters:
+            modules: list[Any] = []
+            for set_id, count in char.relic_set_counts.items():
+                if count < 2:
+                    continue
+                cls = get_relic_module_cls(str(set_id))
+                if cls is None:
+                    continue
+                module = cls()
+                modules.append(module)
+                self._dispatch_relic_hook(module, "on_battle_start", self, char)
+            if modules:
+                self.relic_modules[char.unit_id] = modules
+
+    def _dispatch_relic_hook(self, module: Any, hook: str, *args: Any) -> Any:
+        """分发遗器套装效果钩子。"""
+        fn = getattr(module, hook, None)
+        if not callable(fn):
+            return None
+        return fn(*args)
+
     def _module_for(self, char: CharacterUnit) -> CharacterModule | None:
         """按单位 ID 取角色模块实例。"""
         return self.char_modules.get(char.unit_id)
@@ -1201,7 +1262,7 @@ class BattleSimulator:
             stats: 属性快照（None 用当前面板）。延迟结算的伤害（如缇宝结界
                 附加伤害）应传命中时的属性快照，避免吃到行动中段新增的 buff。
         """
-        damage = self._calc_skill_damage(attacker, effect, target, stats)
+        damage = self._calc_skill_damage(attacker, effect, target, stats, skill_type)
 
         if log is not None:
             log.damages.append(damage)
@@ -1259,6 +1320,12 @@ class BattleSimulator:
             if lc_module is not None:
                 self._dispatch_lightcone_hook(
                     lc_module, "on_attack_hit",
+                    self, attacker, attacker, skill_type,
+                    target, effect, damage, log, token,
+                )
+            for relic_module in self.relic_modules.get(attacker.unit_id, []):
+                self._dispatch_relic_hook(
+                    relic_module, "on_attack_hit",
                     self, attacker, attacker, skill_type,
                     target, effect, damage, log, token,
                 )
@@ -1376,6 +1443,11 @@ class BattleSimulator:
             self._dispatch_hook(module, "on_enemy_dead", self, enemy)
         for owner, lc_module in self.lightcone_modules.items():
             self._dispatch_lightcone_hook(lc_module, "on_enemy_dead", self, owner, enemy)
+        for owner, relic_list in self.relic_modules.items():
+            for relic_module in relic_list:
+                self._dispatch_relic_hook(
+                    relic_module, "on_enemy_dead", self, owner, enemy,
+                )
 
     def recover_energy(self, char: CharacterUnit, amount: float, *, fixed: bool = False) -> float:
         """回复角色能量（钳制到能量上限），返回实际回复量。
@@ -1481,6 +1553,11 @@ class BattleSimulator:
                 self._dispatch_lightcone_hook(
                     lc_module, "on_enemy_act", self, owner, source, log,
                 )
+            for owner, relic_list in self.relic_modules.items():
+                for relic_module in relic_list:
+                    self._dispatch_relic_hook(
+                        relic_module, "on_enemy_act", self, owner, source, log,
+                    )
 
         self.action_queue.advance()
         self.action_queue.remove(entry.unit_id)
@@ -1511,6 +1588,11 @@ class BattleSimulator:
             self._dispatch_hook(module, "on_enemy_act", self, enemy, log)
         for owner, lc_module in self.lightcone_modules.items():
             self._dispatch_lightcone_hook(lc_module, "on_enemy_act", self, owner, enemy, log)
+        for owner, relic_list in self.relic_modules.items():
+            for relic_module in relic_list:
+                self._dispatch_relic_hook(
+                    relic_module, "on_enemy_act", self, owner, enemy, log,
+                )
 
         self.action_queue.advance()
 

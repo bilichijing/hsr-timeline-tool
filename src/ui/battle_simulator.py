@@ -47,7 +47,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.api.client import fetch_character_detail, fetch_lightcone_detail, run_in_loop
+from src.api.client import fetch_character_detail, fetch_lightcone_detail, fetch_relicset_detail, run_in_loop
 from src.api.consts import ELEMENT_MAP, PATH_MAP
 from src.api.transforms import (
     clean_text,
@@ -269,6 +269,8 @@ class _RowCharData:
     lightcone_rank: int = 1     # 光锥叠影等级 1~5（freesr lightcones[].rank）
     lightcone_params: list = field(default_factory=list)  # 当前叠影参数列表
     lightcone_desc: str = ""    # 当前叠影效果描述（插值后，tooltip 用）
+    relic_set_counts: dict = field(default_factory=dict)  # {套装ID: 件数}
+    relic_set_effects: dict = field(default_factory=dict)  # {套装ID: {"2": [...], "4": [...]}}
     ranks_raw: dict = field(default_factory=dict)  # nanoka ranks 原始数据（星魂描述/参数）
 
 
@@ -315,6 +317,45 @@ class _CharacterDetailWorker(QObject):
             "skill_trees_raw": info.skill_trees,
             "ranks_raw": info.ranks,
         }
+
+
+class _FreesrRelicSetWorker(QObject):
+    """后台加载全部遗器套装详情（diskcache 缓存）。"""
+
+    loaded = Signal(object, object)  # ({set_id: {"name","effects"}}, [失败 set_id])
+
+    def __init__(self, set_ids: list[int]) -> None:
+        super().__init__()
+        self.set_ids = set_ids
+
+    def run(self) -> None:
+        try:
+            rows, failed = run_in_loop(self._load())
+            self.loaded.emit(rows, failed)
+        except Exception as e:
+            self.loaded.emit({}, [str(e)])
+        finally:
+            QThread.currentThread().quit()
+
+    async def _load(self) -> tuple[dict, list]:
+        rows: dict = {}
+        failed: list = []
+        for set_id in self.set_ids:
+            try:
+                raw = await fetch_relicset_detail(set_id)
+                require_num = raw.get("require_num") or {}
+                effects = {
+                    str(pieces): list(item.get("param_list") or [])
+                    for pieces, item in require_num.items()
+                    if isinstance(item, dict)
+                }
+                rows[str(set_id)] = {
+                    "name": raw.get("name", ""),
+                    "effects": effects,
+                }
+            except Exception:
+                failed.append(set_id)
+        return rows, failed
 
 
 class _FreesrLightconeWorker(QObject):
@@ -1222,7 +1263,7 @@ class BattleSimulatorWindow(QMainWindow):
         # freesr 导入时序钩子：详情加载完成时补填已导入行的最终面板
         job = getattr(self, "_freesr_job", None)
         if job and any(r == row for r, _ in job["matched"]):
-            self._fill_freesr_panels()
+            self._maybe_fill_freesr_panels()
 
     def _on_detail_failed(self, row: int, err: str) -> None:
         """详情加载失败：提示并保持预设技能。"""
@@ -1351,12 +1392,16 @@ class BattleSimulatorWindow(QMainWindow):
 
         matched, unmatched = self._apply_freesr_profile(profile)
 
-        # 记录导入任务（光锥详情异步加载完成后填面板）
+        # 记录导入任务（光锥/遗器套装详情异步加载完成后填面板）
         self._freesr_job = {
             "profile": profile,
             "matched": matched,
             "lightcone_rows": {},      # {item_id: stats80 行}
             "lc_failed": [],
+            "lc_pending": False,
+            "relicset_rows": {},       # {set_id: {"name","effects"}}
+            "relic_failed": [],
+            "relic_pending": False,
         }
 
         # 收集需要的光锥详情（去重）
@@ -1364,9 +1409,20 @@ class BattleSimulatorWindow(QMainWindow):
             lc.item_id for lcs in profile.lightcones.values() for lc in lcs
         })
         if item_ids:
+            self._freesr_job["lc_pending"] = True
             self._start_freesr_lightcone_load(item_ids)
-        else:
-            self._fill_freesr_panels()
+
+        # 收集需要的遗器套装详情（去重）
+        set_ids = sorted({
+            int(relic.relic_set_id)
+            for relics in profile.relics.values() for relic in relics
+            if relic.relic_set_id
+        })
+        if set_ids:
+            self._freesr_job["relic_pending"] = True
+            self._start_freesr_relicset_load(set_ids)
+
+        self._maybe_fill_freesr_panels()
 
         if unmatched:
             # 未匹配提示截断（freesr 空配置的 data 也计入，可能很多）
@@ -1413,6 +1469,12 @@ class BattleSimulatorWindow(QMainWindow):
             row_data.relics_raw = [
                 r.raw for r in profile.relics.get(char_id, [])
             ]
+            relic_counts: dict[str, int] = {}
+            for relic in profile.relics.get(char_id, []):
+                set_id = str(relic.relic_set_id)
+                relic_counts[set_id] = relic_counts.get(set_id, 0) + 1
+            row_data.relic_set_counts = relic_counts
+            row_data.relic_set_effects = {}
             row_data.lightcone_raw = [
                 lc.raw for lc in profile.lightcones.get(char_id, [])
             ]
@@ -1455,14 +1517,61 @@ class BattleSimulatorWindow(QMainWindow):
         thread.finished.connect(_cleanup)
         thread.start()
 
+    def _start_freesr_relicset_load(self, set_ids: list[int]) -> None:
+        """启动遗器套装详情加载线程（一次性，finished 后自动回收）。"""
+        if not hasattr(self, "_relic_threads"):
+            self._relic_threads: dict[str, QThread] = {}
+            self._relic_workers: dict[str, QObject] = {}
+        thread = QThread()
+        worker = _FreesrRelicSetWorker(set_ids)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.loaded.connect(self._on_freesr_relicset_loaded)
+        thread.finished.connect(thread.deleteLater)
+        key = ",".join(str(i) for i in set_ids)
+        self._relic_threads[key] = thread
+        self._relic_workers[key] = worker
+
+        def _cleanup(k: str = key) -> None:
+            self._relic_threads.pop(k, None)
+            self._relic_workers.pop(k, None)
+
+        thread.finished.connect(_cleanup)
+        thread.start()
+
+    def _on_freesr_relicset_loaded(self, rows: dict, failed: list) -> None:
+        """遗器套装详情就绪：更新导入任务，全部就绪后填面板。"""
+        job = getattr(self, "_freesr_job", None)
+        if job is None:
+            return
+        job["relicset_rows"].update(rows)
+        job["relic_failed"] = list(failed)
+        job["relic_pending"] = False
+        self._maybe_fill_freesr_panels()
+        if failed:
+            QMessageBox.warning(
+                self, "遗器套装数据加载失败",
+                f"以下遗器套装详情加载失败，其效果暂不生效：{failed}",
+            )
+
+    def _maybe_fill_freesr_panels(self) -> None:
+        """光锥与遗器套装详情都就绪后，填写最终面板。"""
+        job = getattr(self, "_freesr_job", None)
+        if not job:
+            return
+        if job.get("lc_pending") or job.get("relic_pending"):
+            return
+        self._fill_freesr_panels()
+
     def _on_freesr_lightcone_loaded(self, rows: dict, failed: list) -> None:
-        """光锥详情就绪：更新导入任务并填面板；失败的按 0 处理并提示。"""
+        """光锥详情就绪：更新导入任务；失败按 0 处理并提示。"""
         job = getattr(self, "_freesr_job", None)
         if job is None:
             return
         job["lightcone_rows"].update(rows)
         job["lc_failed"] = list(failed)
-        self._fill_freesr_panels()
+        job["lc_pending"] = False
+        self._maybe_fill_freesr_panels()
         if failed:
             QMessageBox.warning(
                 self, "光锥数据加载失败",
@@ -1512,6 +1621,14 @@ class BattleSimulatorWindow(QMainWindow):
             self._set_lightcone_cell(
                 row, row_data.lightcone_name, row_data.lightcone_desc,
             )
+
+            # 遗器套装效果参数（nanoka require_num）
+            row_data.relic_set_effects = {}
+            for set_id in row_data.relic_set_counts:
+                info = job.get("relicset_rows", {}).get(set_id) or {}
+                effects = info.get("effects")
+                if isinstance(effects, dict):
+                    row_data.relic_set_effects[set_id] = effects
 
             final = compute_panel(
                 row_data.stats80,
@@ -1887,6 +2004,8 @@ class BattleSimulatorWindow(QMainWindow):
                     lightcone_rank=row_data.lightcone_rank,
                     lightcone_params=row_data.lightcone_params,
                     lightcone_name=row_data.lightcone_name,
+                    relic_set_counts=row_data.relic_set_counts,
+                    relic_set_effects=row_data.relic_set_effects,
                 )
                 # 用户手动编辑的面板数值覆盖真实基础值（模拟遗器加成）
                 char.base_stats.hp_base = cell_float(row, COL_HP, char.base_stats.hp_base)
@@ -1928,6 +2047,8 @@ class BattleSimulatorWindow(QMainWindow):
             char.lightcone_rank = getattr(row_data, "lightcone_rank", 1)
             char.lightcone_params = list(getattr(row_data, "lightcone_params", []) or [])
             char.lightcone_name = getattr(row_data, "lightcone_name", "")
+            char.relic_set_counts = dict(getattr(row_data, "relic_set_counts", {}) or {})
+            char.relic_set_effects = dict(getattr(row_data, "relic_set_effects", {}) or {})
             characters.append(char)
 
         enemy_name = "木桩"
@@ -2560,6 +2681,10 @@ class BattleSimulatorWindow(QMainWindow):
         for module in sim.lightcone_modules.values():
             for name, desc in module.enemy_buffs(sim, enemy):
                 parts.append(f"<b>{name}</b><br>{desc}")
+        for module_list in sim.relic_modules.values():
+            for module in module_list:
+                for name, desc in module.enemy_buffs(sim, enemy):
+                    parts.append(f"<b>{name}</b><br>{desc}")
 
         text_edit = QTextEdit()
         text_edit.setReadOnly(True)
@@ -3259,6 +3384,7 @@ class BattleSimulatorWindow(QMainWindow):
             self._save_config()
         threads = dict(getattr(self, "_detail_threads", {}))
         threads.update(getattr(self, "_lc_threads", {}))
+        threads.update(getattr(self, "_relic_threads", {}))
         for thread in threads.values():
             if thread.isRunning():
                 thread.terminate()
