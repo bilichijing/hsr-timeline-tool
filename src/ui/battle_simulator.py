@@ -108,8 +108,8 @@ ACTION_NAMES_ZH: dict[str, str] = {
 # 配置缓存文件（cache 目录已 gitignore）
 CONFIG_PATH = Path("./cache/team_config.json")
 
-# 侧栏行动预览窗口：只展示从当前总行动值起 150 AV 内的行动
-PREVIEW_AV_WINDOW = 150.0
+# 侧栏行动预览窗口：只展示从当前总行动值起 300 AV 内的行动
+PREVIEW_AV_WINDOW = 300.0
 
 
 # ── 队伍表格行数据与列号 ──────────────────────────────────
@@ -539,18 +539,7 @@ class BattleSimulatorWindow(QMainWindow):
         header_layout.addWidget(sub)
         layout.addWidget(header)
 
-        # ── 队伍概览 ──────────────────────────────────
-        overview_label = QLabel("队伍概览")
-        overview_label.setObjectName("sectionLabel")
-        layout.addWidget(overview_label)
-
-        self.overview_container = QWidget()
-        self.overview_layout = QVBoxLayout(self.overview_container)
-        self.overview_layout.setContentsMargins(0, 0, 0, 0)
-        self.overview_layout.setSpacing(6)
-        layout.addWidget(self.overview_container)
-
-        # ── 未来 150 AV 行动预览 ─────────────────────
+        # ── 未来 300 AV 行动预览 ─────────────────────
         preview_panel = QFrame()
         preview_panel.setObjectName("previewPanel")
         preview_layout = QVBoxLayout(preview_panel)
@@ -558,7 +547,7 @@ class BattleSimulatorWindow(QMainWindow):
         preview_layout.setSpacing(6)
 
         preview_title_row = QHBoxLayout()
-        preview_title = QLabel("未来 150 AV 行动")
+        preview_title = QLabel("未来 300 AV 行动")
         preview_title.setStyleSheet(
             f"color: {Colors.GOLD}; font-size: 12px; font-weight: 700; border: none;"
         )
@@ -1110,100 +1099,6 @@ class BattleSimulatorWindow(QMainWindow):
         line.setFixedHeight(1)
         return line
 
-    # ── 队伍概览更新 ─────────────────────────────────
-
-    def _update_overview(self) -> None:
-        """更新侧栏队伍概览。"""
-        # 清空
-        while self.overview_layout.count():
-            item = self.overview_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        for row in range(self.team_table.rowCount()):
-            name_item = self.team_table.item(row, 0)
-            if not name_item or not name_item.text().strip():
-                continue
-            name = name_item.text().strip()
-
-            # 命途/属性从行数据读取（表格不显示这两列）
-            row_data = name_item.data(Qt.UserRole)
-            if isinstance(row_data, _RowCharData) and row_data.path:
-                path_en, elem_en = row_data.path, row_data.element
-                path_zh = PATH_MAP.get(path_en, path_en)
-                elem_zh = ELEMENT_MAP.get(elem_en, elem_en)
-            else:
-                path_en, elem_en, path_zh, elem_zh = "", "", "", ""
-
-            path_color = PATH_COLORS.get(path_en, Colors.TEXT_SECONDARY)
-            elem_color = ELEMENT_COLORS.get(elem_en, Colors.TEXT_SECONDARY)
-
-            speed_item = self.team_table.item(row, COL_SPD)
-            speed_text = speed_item.text().strip() if speed_item and speed_item.text().strip() else "-"
-
-            card = QFrame()
-            card.setObjectName("overviewCard")
-            card.setStyleSheet(f"""
-                QFrame#overviewCard {{
-                    border-left: 3px solid {path_color or Colors.GOLD};
-                }}
-            """)
-            card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(8, 5, 8, 5)
-            card_layout.setSpacing(3)
-
-            # 第一行：头像 + 名称 + 速度
-            top_row = QHBoxLayout()
-            top_row.setSpacing(7)
-
-            avatar = QLabel(name[:1])
-            avatar.setObjectName("charAvatar")
-            avatar.setFixedSize(26, 26)
-            avatar.setAlignment(Qt.AlignCenter)
-            avatar.setStyleSheet(f"background-color: {elem_color};")
-            top_row.addWidget(avatar)
-
-            name_label = QLabel(name)
-            name_label.setStyleSheet(
-                f"color: {Colors.TEXT_PRIMARY}; font-weight: 700; font-size: 12px; border: none;"
-            )
-            top_row.addWidget(name_label)
-            top_row.addStretch()
-
-            speed_label = QLabel(f"{speed_text}")
-            speed_label.setToolTip("速度")
-            speed_label.setStyleSheet(
-                f"color: {Colors.CYAN}; font-size: 10px; font-weight: 700; border: none;"
-            )
-            top_row.addWidget(speed_label)
-            card_layout.addLayout(top_row)
-
-            # 第二行：命途 / 属性
-            tag_row = QHBoxLayout()
-            tag_row.setSpacing(4)
-            if path_zh:
-                path_dot = QLabel("●")
-                path_dot.setStyleSheet(f"color: {path_color}; font-size: 9px; border: none;")
-                tag_row.addWidget(path_dot)
-                path_label = QLabel(path_zh)
-                path_label.setStyleSheet(
-                    f"color: {path_color}; font-size: 10px; font-weight: 600; border: none;"
-                )
-                tag_row.addWidget(path_label)
-            if elem_zh:
-                sep_label = QLabel("·")
-                sep_label.setStyleSheet(f"color: {Colors.TEXT_DISABLED}; border: none;")
-                tag_row.addWidget(sep_label)
-                elem_label = QLabel(elem_zh)
-                elem_label.setStyleSheet(
-                    f"color: {elem_color}; font-size: 10px; font-weight: 600; border: none;"
-                )
-                tag_row.addWidget(elem_label)
-            tag_row.addStretch()
-            card_layout.addLayout(tag_row)
-
-            self.overview_layout.addWidget(card)
-
     # ── 角色选择 ─────────────────────────────────────
 
     def _on_team_cell_double_clicked(self, row: int, column: int) -> None:
@@ -1221,7 +1116,6 @@ class BattleSimulatorWindow(QMainWindow):
             )
             self.team_table.setItem(row, 0, name_item)
             self._update_element_bonus_tooltips()
-            self._update_overview()
             # 异步加载真实详情（技能/面板自动填充）
             self._start_detail_load(row, c.id)
 
@@ -1291,7 +1185,6 @@ class BattleSimulatorWindow(QMainWindow):
         self._set_cell_value(row, COL_EFFECT_HIT, final.effect_hit)
         self._set_cell_value(row, COL_OUTGOING_HEAL, final.outgoing_heal)
         self._set_cell_value(row, COL_DMG_BONUS, final.dmg_bonus)
-        self._update_overview()
 
         # freesr 导入时序钩子：详情加载完成时补填已导入行的最终面板
         job = getattr(self, "_freesr_job", None)
@@ -1523,7 +1416,6 @@ class BattleSimulatorWindow(QMainWindow):
             self._set_cell_value(row, COL_EFFECT_HIT, final.effect_hit)
             self._set_cell_value(row, COL_OUTGOING_HEAL, final.outgoing_heal)
             self._set_cell_value(row, COL_DMG_BONUS, final.dmg_bonus)
-            self._update_overview()
 
     # ── 默认配置 ─────────────────────────────────────
 
@@ -1555,7 +1447,6 @@ class BattleSimulatorWindow(QMainWindow):
                         COL_EFFECT_HIT, COL_OUTGOING_HEAL, COL_DMG_BONUS):
                 self._set_cell_value(row, col, 0.0)
         self._update_element_bonus_tooltips()
-        self._update_overview()
 
     # ── 配置缓存 ─────────────────────────────────────
 
@@ -1656,7 +1547,6 @@ class BattleSimulatorWindow(QMainWindow):
             for col, text in entry.get("cells", {}).items():
                 self.team_table.setItem(i, int(col), QTableWidgetItem(str(text)))
         self._update_element_bonus_tooltips()
-        self._update_overview()
 
         # ── 怪物配置 ──────────────────────────────
         enemy = data.get("enemy")
@@ -2238,7 +2128,7 @@ class BattleSimulatorWindow(QMainWindow):
                     or (skill_for_sp is not None and skill_for_sp.sp_cost <= 0)
                 )
 
-        # 侧栏：未来 150 AV 行动顺序实时预览
+        # 侧栏：未来 300 AV 行动顺序实时预览
         self._update_action_preview()
 
     def _action_entry_kind(self, sim: BattleSimulator, actor) -> tuple[str, str]:
@@ -2254,7 +2144,7 @@ class BattleSimulatorWindow(QMainWindow):
         return "角色", Colors.GREEN
 
     def _predict_action_timeline(self, sim: BattleSimulator) -> list[dict]:
-        """基于当前行动队列静态预测未来 150 AV 内的行动顺序。
+        """基于当前行动队列静态预测未来 300 AV 内的行动顺序。
 
         说明：这是 UI 层预估，不会修改模拟器状态。角色技能带来的
         速度变化/推拉条/插队终结技需要实际结算后才会反映到下一次预览。
@@ -2301,7 +2191,7 @@ class BattleSimulatorWindow(QMainWindow):
         return items
 
     def _update_action_preview(self) -> None:
-        """更新侧栏“未来 150 AV 行动”预览表。"""
+        """更新侧栏“未来 300 AV 行动”预览表。"""
         table = self.action_preview_table
         table.clearSpans()
         table.setRowCount(0)

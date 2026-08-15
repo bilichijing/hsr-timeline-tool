@@ -370,22 +370,6 @@ QLabel#previewRange {{
     color: {Colors.TEXT_SECONDARY};
     font-size: 10px;
 }}
-QFrame#overviewCard {{
-    background: qlineargradient(
-        x1: 0, y1: 0, x2: 0, y2: 1,
-        stop: 0 {Colors.BG_CARD},
-        stop: 1 {Colors.BG_PANEL}
-    );
-    border: 1px solid {Colors.BORDER};
-    border-radius: 8px;
-}}
-QLabel#charAvatar {{
-    border-radius: 14px;
-    font-size: 12px;
-    font-weight: 800;
-    color: {Colors.BG_DEEPEST};
-}}
-
 /* ── 分组框 ───────────────────────────────────── */
 QGroupBox {{
     background-color: {Colors.BG_PANEL};
