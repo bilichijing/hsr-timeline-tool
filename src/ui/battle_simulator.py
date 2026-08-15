@@ -265,6 +265,10 @@ class _RowCharData:
     lightcone_raw: list = field(default_factory=list)  # freesr 原始光锥列表
     lightcone_stats80: dict = field(default_factory=dict)  # 光锥 80 级基础（面板基础值显示用）
     lightcone_name: str = ""    # 携带光锥名（freesr 导入后填写）
+    lightcone_id: str = ""      # 光锥 nanoka ID
+    lightcone_rank: int = 1     # 光锥叠影等级 1~5（freesr lightcones[].rank）
+    lightcone_params: list = field(default_factory=list)  # 当前叠影参数列表
+    lightcone_desc: str = ""    # 当前叠影效果描述（插值后，tooltip 用）
     ranks_raw: dict = field(default_factory=dict)  # nanoka ranks 原始数据（星魂描述/参数）
 
 
@@ -338,9 +342,19 @@ class _FreesrLightconeWorker(QObject):
             try:
                 raw = await fetch_lightcone_detail(item_id)
                 info = transform_lightcone_detail(raw, str(item_id))
+                refinement = info.refinement
                 rows[item_id] = {
                     "stats80": pick_lightcone_stats80(info),
                     "name": info.name,
+                    "refinement_levels": (
+                        refinement.levels if refinement is not None else {}
+                    ),
+                    "refinement_name": (
+                        refinement.name if refinement is not None else ""
+                    ),
+                    "refinement_desc": (
+                        refinement.desc if refinement is not None else ""
+                    ),
                 }
             except Exception:
                 failed.append(item_id)
@@ -1290,9 +1304,12 @@ class BattleSimulatorWindow(QMainWindow):
         desc = clean_text(raw_rank.get("desc"), raw_rank.get("param_list") or [])
         spin.setToolTip(f"{rank}魂 · {name}\n{desc}".strip())
 
-    def _set_lightcone_cell(self, row: int, name: str) -> None:
-        """写入光锥列（携带光锥名）。"""
-        self.team_table.setItem(row, COL_LIGHTCONE, QTableWidgetItem(name))
+    def _set_lightcone_cell(self, row: int, name: str, desc: str = "") -> None:
+        """写入光锥列（携带光锥名与叠影描述 tooltip）。"""
+        item = QTableWidgetItem(name)
+        if desc:
+            item.setToolTip(f"{name}\n{desc}")
+        self.team_table.setItem(row, COL_LIGHTCONE, item)
 
     def _update_element_bonus_tooltips(self) -> None:
         """属性增伤列 tooltip：按行角色属性动态标注。"""
@@ -1469,13 +1486,32 @@ class BattleSimulatorWindow(QMainWindow):
             # 光锥 80 级行（缺失按 0 处理；同时存入行数据供面板基础值显示与光锥名展示）
             lc_stats80 = None
             lcs = profile.lightcones.get(char_id, [])
+            row_data.lightcone_id = ""
+            row_data.lightcone_rank = 1
+            row_data.lightcone_params = []
+            row_data.lightcone_name = ""
             if lcs:
                 item_id = lcs[0].item_id
                 lc_info = job["lightcone_rows"].get(item_id) or {}
                 lc_stats80 = lc_info.get("stats80")
                 row_data.lightcone_name = lc_info.get("name", "")
+                row_data.lightcone_id = str(lcs[0].item_id)
+                row_data.lightcone_rank = max(1, min(5, int(lcs[0].rank)))
+                levels = lc_info.get("refinement_levels") or {}
+                row_data.lightcone_params = list(
+                    levels.get(str(row_data.lightcone_rank), [])
+                )
+                lc_desc = lc_info.get("refinement_desc", "")
+                lc_name = lc_info.get("refinement_name", "")
+                row_data.lightcone_desc = clean_text(
+                    lc_desc, row_data.lightcone_params
+                )
+                if row_data.lightcone_desc and lc_name:
+                    row_data.lightcone_desc = f"{lc_name}：{row_data.lightcone_desc}"
             row_data.lightcone_stats80 = lc_stats80 or {}
-            self._set_lightcone_cell(row, row_data.lightcone_name)
+            self._set_lightcone_cell(
+                row, row_data.lightcone_name, row_data.lightcone_desc,
+            )
 
             final = compute_panel(
                 row_data.stats80,
@@ -1847,6 +1883,10 @@ class BattleSimulatorWindow(QMainWindow):
                     skill_trees_raw=None,
                     rank=rank,
                     ranks_raw=ranks_raw,
+                    lightcone_id=row_data.lightcone_id,
+                    lightcone_rank=row_data.lightcone_rank,
+                    lightcone_params=row_data.lightcone_params,
+                    lightcone_name=row_data.lightcone_name,
                 )
                 # 用户手动编辑的面板数值覆盖真实基础值（模拟遗器加成）
                 char.base_stats.hp_base = cell_float(row, COL_HP, char.base_stats.hp_base)
@@ -1884,6 +1924,10 @@ class BattleSimulatorWindow(QMainWindow):
                 warnings.append(f"{name}：真实数据未就绪，使用预设技能")
             char.rank = rank
             char.ranks_raw = ranks_raw
+            char.lightcone_id = getattr(row_data, "lightcone_id", "")
+            char.lightcone_rank = getattr(row_data, "lightcone_rank", 1)
+            char.lightcone_params = list(getattr(row_data, "lightcone_params", []) or [])
+            char.lightcone_name = getattr(row_data, "lightcone_name", "")
             characters.append(char)
 
         enemy_name = "木桩"
@@ -2511,6 +2555,9 @@ class BattleSimulatorWindow(QMainWindow):
             parts.append(f"{head}<br>{self._buff_desc(buff)}")
         # 各角色模块施加在该敌人身上的 debuff（饲饵/煞火缠身/结界等，逐条展示）
         for module in sim.char_modules.values():
+            for name, desc in module.enemy_buffs(sim, enemy):
+                parts.append(f"<b>{name}</b><br>{desc}")
+        for module in sim.lightcone_modules.values():
             for name, desc in module.enemy_buffs(sim, enemy):
                 parts.append(f"<b>{name}</b><br>{desc}")
 

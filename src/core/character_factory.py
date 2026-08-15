@@ -116,6 +116,10 @@ def build_character_unit(
     skill_trees_raw: dict | None = None,
     rank: int = 0,
     ranks_raw: dict | None = None,
+    lightcone_id: str = "",
+    lightcone_rank: int = 1,
+    lightcone_params: list[float] | None = None,
+    lightcone_name: str = "",
 ) -> CharacterUnit:
     """构造带真实技能与面板的角色单位。
 
@@ -136,6 +140,10 @@ def build_character_unit(
         skill_trees_raw: 原始行迹（CharacterInfo.skill_trees），提取行迹属性加成
         rank: 星魂等级 0~6
         ranks_raw: nanoka ranks 原始数据（角色模块读星魂参数）
+        lightcone_id: 装备光锥 nanoka ID（空=未装备）
+        lightcone_rank: 光锥叠影等级 1~5
+        lightcone_params: 当前叠影参数列表
+        lightcone_name: 光锥名（展示）
     """
     base = convert_stats80(stats80)
     base.energy_max = float(sp_need) if sp_need > 0 else 100.0
@@ -168,4 +176,8 @@ def build_character_unit(
         skill_trees_raw=skill_trees_raw or {},
         rank=rank,
         ranks_raw=ranks_raw or {},
+        lightcone_id=lightcone_id,
+        lightcone_rank=lightcone_rank,
+        lightcone_params=list(lightcone_params or []),
+        lightcone_name=lightcone_name,
     )

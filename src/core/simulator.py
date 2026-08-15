@@ -63,6 +63,8 @@ class EnemyState:
     resistance: dict[str, float] = field(default_factory=dict)  # {属性: 抗性}
     def_reduce: float = 0.0  # 敌方减防（模块各自维护贡献值，增量式累加/撤销）
     vulnerability: float = 0.0  # 敌方易伤（同上，增量式管理，如千冶【煞火缠身】）
+    crit_dmg_taken: float = 0.0  # 目标受到的暴击伤害提高（光锥【炼狱】等）
+    crit_dmg_taken_by_unit: dict[str, float] = field(default_factory=dict)  # 按装备者额外提高
     max_hp: float = 100000.0   # 生命值上限
     current_hp: float | None = None  # 当前生命值（None = 战斗开始满血，取 max_hp）
     # 减伤 / 抗性 / 防御 buff（由 BuffManager 管理）
@@ -131,6 +133,10 @@ class CharacterUnit:
     ranks_raw: dict = field(default_factory=dict)  # nanoka ranks 原始数据（星魂效果模块用）
     overflow_energy: float = 0.0       # 当前溢出能量（百炼骨等机制）
     overflow_energy_max: float = 0.0   # 溢出能量上限（0=不启用）
+    lightcone_id: str = ""             # 装备光锥 nanoka ID（空=未装备）
+    lightcone_rank: int = 1            # 光锥叠影等级 1~5
+    lightcone_params: list[float] = field(default_factory=list)  # 当前叠影参数
+    lightcone_name: str = ""           # 装备光锥名称（展示用）
 
     def __post_init__(self) -> None:
         self.buff_mgr.unit_id = self.unit_id
@@ -283,6 +289,8 @@ class BattleSimulator:
     current_turn: int = 0
     # 角色技能模块（unit_id → 模块实例），由 setup() 按 char.char_id 挂载
     char_modules: dict[str, CharacterModule] = field(default_factory=dict)
+    # 光锥效果模块（装备者 unit_id → 模块实例），由 setup() 按 char.lightcone_id 挂载
+    lightcone_modules: dict[str, Any] = field(default_factory=dict)
     # advance_av() 已推进到的行动者（手动推进键幂等标记；交互模式用）
     pending_av_actor: str | None = None
     # 行动条倒计时单位（倒计时 unit_id → 所属角色 unit_id）
@@ -372,6 +380,8 @@ class BattleSimulator:
 
         # 角色技能模块挂载（按 char.char_id 查注册表）
         self._init_char_modules()
+        # 光锥效果模块挂载（按 char.lightcone_id 查注册表）
+        self._init_lightcone_modules()
         self.pending_av_actor = None
 
     def _grant_laugh_point(self, amount: float) -> None:
@@ -669,6 +679,7 @@ class BattleSimulator:
             "aha_count": self.aha_count,
             "aha_entry": copy.deepcopy(self.aha_entry),
             "char_modules": copy.deepcopy(self.char_modules),
+            "lightcone_modules": copy.deepcopy(self.lightcone_modules),
             "pending_av_actor": self.pending_av_actor,
             "countdown_units": dict(self.countdown_units),
             "action_token": self.action_token,
@@ -688,6 +699,7 @@ class BattleSimulator:
         self.aha_count = snap["aha_count"]
         self.aha_entry = copy.deepcopy(snap["aha_entry"])
         self.char_modules = copy.deepcopy(snap.get("char_modules", {}))
+        self.lightcone_modules = copy.deepcopy(snap.get("lightcone_modules", {}))
         self.pending_av_actor = snap.get("pending_av_actor")
         self.countdown_units = dict(snap.get("countdown_units", {}))
         self.action_token = snap.get("action_token", 0)
@@ -761,6 +773,9 @@ class BattleSimulator:
         # 回合开始钩子（模块在此做自身回合计时，如缇宝结界剩余回合 -1）
         for module in self.char_modules.values():
             self._dispatch_hook(module, "on_turn_start", self, char)
+        lc_module = self.lightcone_modules.get(char.unit_id)
+        if lc_module is not None:
+            self._dispatch_lightcone_hook(lc_module, "on_turn_start", self, char)
 
         # 获取技能
         skill: Skill | None = None
@@ -772,6 +787,9 @@ class BattleSimulator:
             # 回合结束
             char.buff_mgr.tick_turn_end()
             char.buff_mgr.end_turn()
+            lc_module = self.lightcone_modules.get(char.unit_id)
+            if lc_module is not None:
+                self._dispatch_lightcone_hook(lc_module, "on_turn_end", self, char)
             self.action_queue.advance()
             return None
 
@@ -783,6 +801,9 @@ class BattleSimulator:
             # （避免与"战斗结束"混淆——step() 返回 None 会被 UI 当作结束）
             char.buff_mgr.tick_turn_end()
             char.buff_mgr.end_turn()
+            lc_module = self.lightcone_modules.get(char.unit_id)
+            if lc_module is not None:
+                self._dispatch_lightcone_hook(lc_module, "on_turn_end", self, char)
             self.action_queue.advance()
             log = ActionLog(
                 av=entry.current_av,
@@ -891,6 +912,11 @@ class BattleSimulator:
         # 技能释放钩子（模块在此标记目标、追加伤害/回 SP 等，需在伤害结算前）
         for module in self.char_modules.values():
             self._dispatch_hook(module, "on_skill_cast", self, char, skill, action, target, log)
+        lc_module = self.lightcone_modules.get(char.unit_id)
+        if lc_module is not None:
+            self._dispatch_lightcone_hook(
+                lc_module, "on_skill_cast", self, char, skill, action, target, log,
+            )
 
         # 主日志先入列：模块在 on_attack_hit / on_skill_end 中创建的追加攻击日志
         # 自然排在本行动之后（damages 等字段仍可继续写入，列表是引用）
@@ -961,6 +987,13 @@ class BattleSimulator:
                         module, "on_attack_hit",
                         self, char, skill, target, effect, damage, log, hit_token,
                     )
+                lc_module = self.lightcone_modules.get(char.unit_id)
+                if lc_module is not None:
+                    self._dispatch_lightcone_hook(
+                        lc_module, "on_attack_hit",
+                        self, char, char, skill.skill_type,
+                        target, effect, damage, log, hit_token,
+                    )
 
         # NEXT_ATTACK 类型 buff 失效
         char.buff_mgr.tick_attack()
@@ -969,15 +1002,28 @@ class BattleSimulator:
             # 回合结束
             char.buff_mgr.tick_turn_end()
             char.buff_mgr.end_turn()
+            lc_module = self.lightcone_modules.get(char.unit_id)
+            if lc_module is not None:
+                self._dispatch_lightcone_hook(lc_module, "on_turn_end", self, char)
 
         # 技能结算钩子（模块在此触发终结技强化链等；其创建的追加攻击日志排在本日志之后）
         for module in self.char_modules.values():
             self._dispatch_hook(module, "on_skill_end", self, char, skill, action, target, log)
+        lc_module = self.lightcone_modules.get(char.unit_id)
+        if lc_module is not None:
+            self._dispatch_lightcone_hook(
+                lc_module, "on_skill_end", self, char, skill, action, target, log,
+            )
 
         # 技能收尾钩子（在所有模块 on_skill_end 之后分发，顺序无关）：
         # 供"行动完全结束"才结算的效果使用（如缇宝结界附加伤害取被攻击目标中生命最高者）
         for module in self.char_modules.values():
             self._dispatch_hook(module, "on_post_skill", self, char, skill, action, target, log)
+        lc_module = self.lightcone_modules.get(char.unit_id)
+        if lc_module is not None:
+            self._dispatch_lightcone_hook(
+                lc_module, "on_post_skill", self, char, skill, action, target, log,
+            )
 
         if is_turn:
             self.action_queue.advance()
@@ -1035,7 +1081,10 @@ class BattleSimulator:
             defense_ctx=def_ctx,
             is_crit=False,  # 暴击由调用方决定
             crit_rate=stats.crit_rate,
-            crit_dmg=stats.crit_dmg,
+            # 目标“受到暴击伤害提高”已接到 crit_dmg 字段（当前 is_crit=False，供未来暴击结算）
+            crit_dmg=stats.crit_dmg
+            + target.crit_dmg_taken
+            + target.crit_dmg_taken_by_unit.get(char.unit_id, 0.0),
             break_effect=stats.break_effect,
             toughness_max=target.max_toughness,
             actual_toughness_reduced=effect.toughness_damage,
@@ -1080,6 +1129,28 @@ class BattleSimulator:
             module = cls()
             self.char_modules[char.unit_id] = module
             self._dispatch_hook(module, "on_battle_start", self, char)
+
+    def _init_lightcone_modules(self) -> None:
+        """按角色装备的光锥 ID 实例化光锥效果模块并触发战斗开始钩子。"""
+        from .lightcones import get_module_cls as get_lightcone_module_cls
+
+        self.lightcone_modules = {}
+        for char in self.characters:
+            if not char.lightcone_id:
+                continue
+            cls = get_lightcone_module_cls(char.lightcone_id)
+            if cls is None:
+                continue
+            module = cls()
+            self.lightcone_modules[char.unit_id] = module
+            self._dispatch_lightcone_hook(module, "on_battle_start", self, char)
+
+    def _dispatch_lightcone_hook(self, module: Any, hook: str, *args: Any) -> Any:
+        """分发光锥效果钩子。"""
+        fn = getattr(module, hook, None)
+        if not callable(fn):
+            return None
+        return fn(*args)
 
     def _module_for(self, char: CharacterUnit) -> CharacterModule | None:
         """按单位 ID 取角色模块实例。"""
@@ -1183,6 +1254,13 @@ class BattleSimulator:
                 self._dispatch_hook(
                     module, "on_attack_hit",
                     self, attacker, None, target, effect, damage, log, token,
+                )
+            lc_module = self.lightcone_modules.get(attacker.unit_id)
+            if lc_module is not None:
+                self._dispatch_lightcone_hook(
+                    lc_module, "on_attack_hit",
+                    self, attacker, attacker, skill_type,
+                    target, effect, damage, log, token,
                 )
 
         return damage
@@ -1296,6 +1374,8 @@ class BattleSimulator:
             self.enemies.remove(enemy)
         for module in self.char_modules.values():
             self._dispatch_hook(module, "on_enemy_dead", self, enemy)
+        for owner, lc_module in self.lightcone_modules.items():
+            self._dispatch_lightcone_hook(lc_module, "on_enemy_dead", self, owner, enemy)
 
     def recover_energy(self, char: CharacterUnit, amount: float, *, fixed: bool = False) -> float:
         """回复角色能量（钳制到能量上限），返回实际回复量。
@@ -1395,6 +1475,13 @@ class BattleSimulator:
             log.energy_after = char.energy
             log.sp_after = self.sp.current
 
+        # 配置式敌方攻击也视为一次敌方行动：光锥 debuff 回合计时
+        if source is not None:
+            for owner, lc_module in self.lightcone_modules.items():
+                self._dispatch_lightcone_hook(
+                    lc_module, "on_enemy_act", self, owner, source, log,
+                )
+
         self.action_queue.advance()
         self.action_queue.remove(entry.unit_id)
 
@@ -1422,6 +1509,8 @@ class BattleSimulator:
         # 怪物行动钩子（模块在此做敌方回合计时，如千冶【煞火缠身】剩余回合 -1）
         for module in self.char_modules.values():
             self._dispatch_hook(module, "on_enemy_act", self, enemy, log)
+        for owner, lc_module in self.lightcone_modules.items():
+            self._dispatch_lightcone_hook(lc_module, "on_enemy_act", self, owner, enemy, log)
 
         self.action_queue.advance()
 
