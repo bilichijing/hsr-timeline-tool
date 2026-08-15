@@ -12,9 +12,13 @@
 副词条公式：最终值 = 最低档×count + (第二档-最低档)×step。
 主词条按部位与 main_affix_id 映射，数值表见 RELIC_MAIN_AFFIXES。
 
-待实现（用户明确晚点做）：
-- 遗器套装效果（relic_set_id 只记录不计算）
-- 星魂效果（rank 只记录）
+已实现：
+- 星魂等级 rank 已接入 CharacterUnit 与模拟器角色模块。
+- freesr 数据中出现的六套遗器效果（110/115/132/308/319/326）
+  由 src/core/relics 挂载。
+
+待实现：
+- 其余遗器套装效果。
 """
 
 from __future__ import annotations
@@ -79,9 +83,8 @@ RELIC_MAIN_AFFIXES: dict[int, dict[int, tuple[str, float]]] = {
     },
 }
 
-# TODO: 位面球 id4-10 的元素顺序（物理/火/冰/雷/风/量子/虚数）待实测校准；
-# 因 StatBonus.dmg_bonus 为单值（stats.py TODO），当前全部写入 dmg_bonus 无实际影响，
-# 未来"按属性区分增伤"时再按顺序归属。
+# TODO: 位面球 id4-10 的元素顺序（物理/火/冰/雷/风/量子/虚数）待实测校准。
+# 校准前暂时全部写入通用 dmg_bonus；校准后应改为写入 elemental_dmg_bonus。
 
 # 主技能 id 后缀 → SkillType（freesr "1504001" → 普攻）
 FREESR_SKILL_SUFFIX: dict[str, SkillType] = {
@@ -115,7 +118,7 @@ class FreesrRelic:
     equip_avatar: str
     slot: int                  # 1-6 部位（relic_id 末位）
     relic_id: int
-    relic_set_id: int          # 套装编号（只记录不计算）
+    relic_set_id: int          # 套装编号（relics 模块按此挂载套装效果）
     level: int = 15
     main_affix_id: int = 0
     bonus: StatBonus = field(default_factory=StatBonus)   # 主词条+副词条
@@ -253,7 +256,7 @@ def parse_freesr(data: dict) -> FreesrProfile:
     规则：
     - avatar data 缺失或为 None → 跳过（空配置）
     - relic/lightcone 的 equip_avatar 无对应 avatar 配置 → 丢弃
-    - relic_set_id 只记录不计算（套装效果待实现）
+    - relic_set_id 用于统计套装件数，效果由 src/core/relics 挂载
     """
     profile = FreesrProfile()
 

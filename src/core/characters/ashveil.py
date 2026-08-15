@@ -21,7 +21,7 @@
   #6 婪酣上限（12）、#7 回能量（8）
 - 150407 秘技：战前机制，不建模
 
-未建模（TODO，因模拟器暂无敌人 HP/死亡模型）：
+未建模（TODO）：
 - 终结技强化追击"致命攻击转移"（击杀饲饵后转移到新饲饵继续打）
 """
 
@@ -246,7 +246,7 @@ class AshveilModule(CharacterModule):
             self.greed = min(self.greed_cap, self.greed + refund)
             self.greed_gained_total += refund
             self._update_e6_dmg_buff(char)
-        # TODO: 致命攻击转移未建模（需敌人 HP/死亡模型）：
+        # TODO: 致命攻击转移未建模：
         #   追击击杀饲饵后应转移到新饲饵继续打，直至婪酣 < #3 层。
 
     def on_enemy_dead(self, sim: BattleSimulator, enemy: EnemyState) -> None:

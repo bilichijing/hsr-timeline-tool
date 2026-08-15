@@ -580,7 +580,7 @@ class TribbieModule(CharacterModule):
         if self.e6_talent_dmg_bonus > 0:
             e6_stats = char.final_stats()
             e6_stats.dmg_bonus += self.e6_talent_dmg_bonus
-        # 对敌方全体造成伤害（单敌模型 = 1 段；多敌 TODO 全打）
+        # 对敌方全体造成伤害（遍历当前场上所有敌人）
         for enemy in sim.enemies:
             effect = SkillEffect(
                 damage_type=DamageType.NORMAL,

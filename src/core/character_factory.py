@@ -28,8 +28,8 @@ GROWTH_STEPS = MAX_LEVEL - 1  # 成长级数（属性 = 基础 + 每级成长 ×
 STATS_KEY_80 = "6"
 
 # 行迹属性加成：property_type（nanoka）→ StatBonus 字段名
-# 属性伤害（物理/火/冰/雷/风/量子/虚数）全部进单值 dmg_bonus
-# （TODO: dmg_bonus 暂不区分属性，stats.py 既有 TODO）
+# 属性伤害（物理/火/冰/雷/风/量子/虚数）当前归入通用 dmg_bonus；
+# 如后续行迹需要分属性增伤，可改为写入 elemental_dmg_bonus。
 TRACE_PROPERTY_MAP: dict[str, str] = {
     "HPAddedRatio": "hp_pct",
     "AttackAddedRatio": "atk_pct",

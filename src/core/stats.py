@@ -11,7 +11,9 @@
 - def_pct / def_flat     防御百分比 / 固定值
 - spd_pct / spd_flat     速度百分比 / 固定值
 - crit_rate / crit_dmg   暴击率 / 暴击伤害
-- dmg_bonus              伤害加成（属性增伤、通用增伤；暂不区分属性，见字段 TODO）
+- dmg_bonus              通用增伤（角色属性增伤/装备通用增伤）
+- elemental_dmg_bonus    分属性增伤 {属性: 小数}
+- follow_up_dmg_bonus    追加攻击增伤
 - break_effect           击破特攻
 - effect_hit / effect_res 效果命中 / 效果抵抗
 - energy_regen           能量恢复效率（回能乘区）
@@ -76,9 +78,7 @@ class StatBonus:
     spd_pct: float = 0.0
     crit_rate: float = 0.0
     crit_dmg: float = 0.0
-    dmg_bonus: float = 0.0          # 属性增伤、通用增伤
-    # TODO: dmg_bonus 暂为单值不区分属性。UI 只配置角色自身属性增伤一项，
-    #       且伤害路径 element 恒等于角色属性，单值足够；引入跨属性增伤时再 dict 化。
+    dmg_bonus: float = 0.0          # 通用增伤（UI 属性增伤列仍为角色自身属性）
     break_effect: float = 0.0
     effect_hit: float = 0.0
     effect_res: float = 0.0
