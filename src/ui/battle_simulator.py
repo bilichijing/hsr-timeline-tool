@@ -563,9 +563,9 @@ class BattleSimulatorWindow(QMainWindow):
         self.preview_range_label.setObjectName("previewRange")
         preview_layout.addWidget(self.preview_range_label)
 
-        self.action_preview_table = QTableWidget(0, 4)
-        self.action_preview_table.setHorizontalHeaderLabels(["#", "行动者", "+AV", "总AV"])
-        self.action_preview_table.setFixedHeight(300)
+        self.action_preview_table = QTableWidget(0, 3)
+        self.action_preview_table.setHorizontalHeaderLabels(["行动者", "+AV", "总AV"])
+        self.action_preview_table.setFixedHeight(500)
         self.action_preview_table.setShowGrid(False)
         self.action_preview_table.setAlternatingRowColors(True)
         self.action_preview_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -574,10 +574,9 @@ class BattleSimulatorWindow(QMainWindow):
         self.action_preview_table.verticalHeader().setVisible(False)
         self.action_preview_table.verticalHeader().setDefaultSectionSize(25)
         self.action_preview_table.horizontalHeader().setSectionResizeMode(QHeaderView.Fixed)
-        self.action_preview_table.setColumnWidth(0, 26)
-        self.action_preview_table.setColumnWidth(1, 112)
-        self.action_preview_table.setColumnWidth(2, 50)
-        self.action_preview_table.setColumnWidth(3, 54)
+        self.action_preview_table.setColumnWidth(0, 136)
+        self.action_preview_table.setColumnWidth(1, 52)
+        self.action_preview_table.setColumnWidth(2, 54)
         self.action_preview_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.action_preview_table.setToolTip(
             "基于当前行动队列的静态预测；角色技能造成的推拉条/速度变化以实际结算为准"
@@ -2270,10 +2269,6 @@ class BattleSimulatorWindow(QMainWindow):
         for i, item in enumerate(items):
             is_next = i == 0
 
-            seq = QTableWidgetItem(f"{i + 1:02d}")
-            seq.setTextAlignment(Qt.AlignCenter)
-            seq.setForeground(QColor(Colors.GOLD if is_next else Colors.TEXT_SECONDARY))
-
             name_item = QTableWidgetItem(item["name"])
             name_item.setForeground(QColor(item["color"]))
             if item["kind"] == "角色":
@@ -2294,14 +2289,13 @@ class BattleSimulatorWindow(QMainWindow):
             total_item.setTextAlignment(Qt.AlignCenter)
             total_item.setForeground(QColor(Colors.TEXT_PRIMARY))
 
-            table.setItem(i, 0, seq)
-            table.setItem(i, 1, name_item)
-            table.setItem(i, 2, delta_item)
-            table.setItem(i, 3, total_item)
+            table.setItem(i, 0, name_item)
+            table.setItem(i, 1, delta_item)
+            table.setItem(i, 2, total_item)
 
             if is_next:
                 bg = QColor(Colors.BG_SELECTED)
-                for col in range(4):
+                for col in range(3):
                     cell = table.item(i, col)
                     if cell is not None:
                         cell.setBackground(bg)
