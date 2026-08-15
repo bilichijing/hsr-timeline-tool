@@ -565,7 +565,7 @@ class BattleSimulatorWindow(QMainWindow):
 
         self.action_preview_table = QTableWidget(0, 4)
         self.action_preview_table.setHorizontalHeaderLabels(["#", "行动者", "+AV", "总AV"])
-        self.action_preview_table.setFixedHeight(180)
+        self.action_preview_table.setFixedHeight(300)
         self.action_preview_table.setShowGrid(False)
         self.action_preview_table.setAlternatingRowColors(True)
         self.action_preview_table.setEditTriggers(QTableWidget.NoEditTriggers)
