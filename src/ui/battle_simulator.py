@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, Qt, QThread, Signal
-from PySide6.QtGui import QColor, QFont, QPalette
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
@@ -77,7 +77,7 @@ from src.core.simulator import (
 from src.core.skill import Skill, SkillEffect, SkillType
 from src.core.stats import BaseStats, StatBonus
 from src.ui.theme import DARK_STYLE, Colors, ELEMENT_COLORS, PATH_COLORS
-from src.ui.widgets.character_picker import CharacterPickerDialog, _load_character_icon
+from src.ui.widgets.character_picker import CharacterPickerDialog, ICONS_DIR, _load_character_icon
 from src.ui.widgets.damage_pie import DamagePieChartWidget
 from src.ui.widgets.enemy_target import EnemyTargetWidget
 from src.ui.widgets.sp_indicator import SPIndicatorWidget
@@ -2167,6 +2167,7 @@ class BattleSimulatorWindow(QMainWindow):
         while total_av <= window_end + 1e-9 and safety < 60:
             kind, color = self._action_entry_kind(sim, actor)
             items.append({
+                "unit_id": actor.unit_id,
                 "name": actor.name,
                 "kind": kind,
                 "color": color,
@@ -2189,6 +2190,42 @@ class BattleSimulatorWindow(QMainWindow):
             safety += 1
 
         return items
+
+    def _character_avatar_icon(self, char) -> QIcon:
+        """构造行动预览用的角色头像图标。
+
+        真实角色优先读取本地头像缓存；没有本地头像（如预设角色）时，
+        生成元素配色 + 首字的圆形占位头像。
+        """
+        if char is not None and char.char_id:
+            icon_path = ICONS_DIR / f"character_{char.char_id}.webp"
+            if icon_path.exists():
+                pix = _load_character_icon(char.char_id)
+                if not pix.isNull():
+                    return QIcon(
+                        pix.scaled(20, 20, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    )
+
+        pixmap = QPixmap(20, 20)
+        pixmap.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        color = ELEMENT_COLORS.get(char.element, Colors.CYAN) if char else Colors.BG_HOVER
+        painter.setBrush(QColor(color))
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(0, 0, 20, 20)
+        painter.setPen(QColor(Colors.BG_DEEPEST))
+        font = QFont()
+        font.setPixelSize(11)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(
+            pixmap.rect(),
+            Qt.AlignCenter,
+            char.name[:1] if char and char.name else "?",
+        )
+        painter.end()
+        return QIcon(pixmap)
 
     def _update_action_preview(self) -> None:
         """更新侧栏“未来 300 AV 行动”预览表。"""
@@ -2239,6 +2276,11 @@ class BattleSimulatorWindow(QMainWindow):
 
             name_item = QTableWidgetItem(item["name"])
             name_item.setForeground(QColor(item["color"]))
+            if item["kind"] == "角色":
+                char = sim._get_character(item["unit_id"])
+                icon = self._character_avatar_icon(char)
+                if not icon.isNull():
+                    name_item.setIcon(icon)
             name_item.setToolTip(
                 f"{item['kind']} · 预计总AV {item['total_av']:.1f}"
             )
