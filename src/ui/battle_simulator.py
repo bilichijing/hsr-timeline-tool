@@ -2618,6 +2618,7 @@ class BattleSimulatorWindow(QMainWindow):
         "dmg_bonus": "伤害提高", "break_effect": "击破特攻提升",
         "effect_hit": "效果命中提升", "effect_res": "效果抵抗提升",
         "energy_regen": "能量恢复效率提升", "outgoing_heal": "治疗量加成提升",
+        "incoming_heal": "受到治疗提高",
         "res_pen": "我方全体目标全属性抗性穿透提高",
         "hp_flat": "生命值提升", "atk_flat": "攻击力提升", "def_flat": "防御力提升",
         "spd_flat": "速度提升",
@@ -2628,7 +2629,7 @@ class BattleSimulatorWindow(QMainWindow):
     _PCT_BUFF_STATS = {
         "hp_pct", "atk_pct", "def_pct", "spd_pct", "crit_rate", "crit_dmg",
         "dmg_bonus", "break_effect", "effect_hit", "effect_res",
-        "energy_regen", "outgoing_heal", "res_pen", "good_joke",
+        "energy_regen", "outgoing_heal", "incoming_heal", "res_pen", "good_joke",
         "elation_dmg", "laugh_bonus",
     }
 

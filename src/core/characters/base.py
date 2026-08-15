@@ -134,6 +134,20 @@ class CharacterModule:
     ) -> None:
         """敌人死亡离场后：清理模块对它的引用（如饲饵、煞火缠身）。"""
 
+    def on_incoming_damage(
+        self,
+        sim: BattleSimulator,
+        char: CharacterUnit,
+        amount: float,
+        source: Any,
+        context: Any = None,
+    ) -> float:
+        """我方角色即将受到伤害：返回减免后的最终伤害。
+
+        返回非数值（None）表示不参与减免，按原伤害结算。
+        """
+        return amount
+
     def on_damage_taken(
         self,
         sim: BattleSimulator,

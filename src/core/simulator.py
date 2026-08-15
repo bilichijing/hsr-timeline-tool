@@ -129,6 +129,8 @@ class CharacterUnit:
     skill_trees_raw: dict = field(default_factory=dict)  # 原始行迹（模块读额外能力参数用）
     rank: int = 0                # 星魂等级 0~6（freesr data.rank / UI 队伍配置）
     ranks_raw: dict = field(default_factory=dict)  # nanoka ranks 原始数据（星魂效果模块用）
+    overflow_energy: float = 0.0       # 当前溢出能量（百炼骨等机制）
+    overflow_energy_max: float = 0.0   # 溢出能量上限（0=不启用）
 
     def __post_init__(self) -> None:
         self.buff_mgr.unit_id = self.unit_id
@@ -850,6 +852,13 @@ class BattleSimulator:
             self.sp.recover(-skill.sp_cost)
         if skill.energy_cost > 0:
             char.energy = max(0, char.energy - skill.energy_cost)
+            # 溢出能量：施放终结技后清空并恢复相应能量值
+            if char.overflow_energy > 0:
+                char.energy = min(
+                    char.base_stats.energy_max,
+                    char.energy + char.overflow_energy,
+                )
+                char.overflow_energy = 0.0
         # 行动回复能量（能量恢复效率乘区：回复量 × (1 + energy_regen)）
         # - 正常回合：真实技能用解析出的回复值（如普攻 20），预设为 0 时回 20
         # - 终结技插队：仅回复技能自带回能（如不死途 5）；预设终结技无回能则不回
@@ -860,11 +869,7 @@ class BattleSimulator:
         else:
             recover = 0.0
         if recover:
-            regen = char.final_stats().energy_regen
-            char.energy = min(
-                char.base_stats.energy_max,
-                char.energy + recover * (1 + regen),
-            )
+            self.recover_energy(char, recover)
 
         # 目标
         target = self._get_enemy(action.target_id) if action.target_id else (
@@ -1305,7 +1310,17 @@ class BattleSimulator:
             actual = amount
         else:
             actual = amount * (1 + char.final_stats().energy_regen)
+        if actual <= 0:
+            return 0.0
         char.energy = min(char.base_stats.energy_max, char.energy + actual)
+        # 溢出能量：超出上限的部分积攒到 overflow（启用时才有）
+        if char.overflow_energy_max > 0:
+            gained = char.energy - before
+            overflow = min(char.overflow_energy_max, char.overflow_energy + actual - gained)
+            char.overflow_energy = max(0.0, overflow)
+        # 能量恢复至上限时，解除自身所有负面效果（千冶·百炼骨）
+        if before < char.base_stats.energy_max and char.energy >= char.base_stats.energy_max:
+            char.buff_mgr.remove_debuffs()
         return char.energy - before
 
     def _enemy_attack_act(self, entry: ActionEntry) -> None:
@@ -1346,6 +1361,14 @@ class BattleSimulator:
             defense = char.final_stats().defense
             def_coeff = (10 * enemy_level + 200) / (10 * enemy_level + 200 + defense)
             damage = atk.attack * def_coeff
+            # 我方受击减伤钩子（如千冶·千锻魂：结界期间受到伤害降低 50%）
+            for module in self.char_modules.values():
+                reduced = self._dispatch_hook(
+                    module, "on_incoming_damage",
+                    self, char, damage, source or entry, entry,
+                )
+                if isinstance(reduced, (int, float)):
+                    damage = max(0.0, float(reduced))
             if damage > 0:
                 char.current_hp = max(0.0, char.current_hp - damage)
                 log.damages.append(damage)

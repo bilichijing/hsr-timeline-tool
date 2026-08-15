@@ -460,6 +460,29 @@ def _trace_with_bailiangu(ratio: float = 0.75) -> dict:
     }
 
 
+def _trace_with_all_traces() -> dict:
+    """构造含百炼骨 / 千锻魂 / 万淬心三个额外能力的行迹原始结构。"""
+    return {
+        "group1": {
+            "bailiangu": {
+                "point_type": 3,
+                "point_name": "百炼骨",
+                "param_list": [0.75, 80],
+            },
+            "qianduan": {
+                "point_type": 3,
+                "point_name": "千锻魂",
+                "param_list": [10, 0.5, 0.5],
+            },
+            "wancui": {
+                "point_type": 3,
+                "point_name": "万淬心",
+                "param_list": [0.5, 0.75, 0.75],
+            },
+        },
+    }
+
+
 class TestTraceEnergyRegen:
     def test_battle_start_regen_to_75(self):
         """战斗开始能量不足 75% → 恢复至 75%（默认比例 0.75）。"""
@@ -813,3 +836,103 @@ class TestEidolons:
         assert module.charge == 1
         module._e6_charge_from_hp_loss(sim, char)
         assert module.charge == 1  # 同一行动去重
+
+
+class TestAdditionalTraces:
+    """百炼骨完整效果 / 千锻魂 / 万淬心 / E4。"""
+
+    def _with_all_traces(self, rank: int = 0):
+        char = _make_mortenax()
+        char.rank = rank
+        char.skill_trees_raw = _trace_with_all_traces()
+        if rank:
+            char.ranks_raw = {
+                "4": {"id": 150704, "name": "四魂", "desc": "万淬心额外增伤", "param_list": [0.5]},
+            }
+        sim = _make_sim(char, _make_enemy())
+        return char, sim, _module(sim)
+
+    def test_bailiangu_overflow_restored_after_ultra(self):
+        """百炼骨：溢出能量最多 80，终结技后清空并恢复。"""
+        from src.core.skill import SkillType
+
+        char = _make_mortenax()
+        char.skill_trees_raw = _trace_with_bailiangu()
+        sim = _make_sim(char, _make_enemy())
+        assert char.overflow_energy_max == 80
+        # 能量 150/160，回复 50 → 实际 +10，溢出 +40
+        char.energy = 150
+        assert sim.recover_energy(char, 50) == 10
+        assert char.overflow_energy == 40
+        # 终结技消耗 160 后，立即返还 40 溢出能量，随后终结技自回 5
+        char.energy = 160
+        sim.execute_ultra(0)
+        assert char.overflow_energy == 0
+        assert char.energy == 45
+
+    def test_bailiangu_cleanse_debuff_at_energy_cap(self):
+        """百炼骨：能量恢复至上限时解除自身所有负面效果。"""
+        from src.core.buff import Buff, BuffDuration, StackRule
+
+        char = _make_mortenax()
+        char.skill_trees_raw = _trace_with_bailiangu()
+        sim = _make_sim(char, _make_enemy())
+        char.energy = 150
+        char.buff_mgr.add(Buff(
+            id="test_debuff", name="测试负面效果", stat="spd_flat",
+            value=-10, duration_type=BuffDuration.PERMANENT, duration_count=-1,
+            source_unit=char.unit_id, stack_rule=StackRule.STACK_ALWAYS,
+            is_debuff=True,
+        ))
+        sim.recover_energy(char, 50)
+        assert not any(b.is_debuff for b in char.buff_mgr.buffs)
+
+    def test_qianduan_damage_reduction_blaze_and_charge(self):
+        """千锻魂：受伤降低 50%，受击后给攻击者上煞火缠身并充能。"""
+        from types import SimpleNamespace
+
+        char, sim, module = self._with_all_traces()
+        enemy = sim.enemies[0]
+        module.rage = True
+        module._apply_qian_duan_buffs(char)
+        assert module.on_incoming_damage(sim, char, 100, enemy) == 50
+        module.on_damage_taken(sim, char, 50, enemy, SimpleNamespace(unit_id="hit1"))
+        assert enemy.unit_id in module.blaze
+        assert module.charge == 1
+        assert char.final_stats().incoming_heal == 0.5
+
+    def test_wan_all_damage_and_no_nihility_self_extra(self):
+        """万淬心：结界期间我方全体增伤；无虚无队友时千冶额外增伤。"""
+        char, sim, module = self._with_all_traces()
+        module.rage = True
+        module._apply_wan_buffs(sim, char)
+        assert char.final_stats().dmg_bonus == 0.5 + 0.75
+        assert not module.wan_nihility_teammate
+        module._remove_wan_buffs(sim)
+        assert char.final_stats().dmg_bonus == 0
+
+    def test_wan_nihility_teammate_ultra_bonus(self):
+        """万淬心：有除千冶外的虚无队友时，我方终结技伤害提高。"""
+        char = _make_mortenax()
+        char.skill_trees_raw = _trace_with_all_traces()
+        mate = CharacterUnit(
+            unit_id="mate", name="虚无队友", path="Warlock", element="Fire", level=80,
+        )
+        mate.base_stats = BaseStats(hp_base=5000, spd_base=90, energy_max=100)
+        enemy = _make_enemy()
+        sim = BattleSimulator(characters=[char, mate], enemies=[enemy])
+        sim.setup()
+        module = sim.char_modules[char.unit_id]
+        module.rage = True
+        module._apply_wan_buffs(sim, char)
+        assert module.wan_nihility_teammate
+        assert char.final_stats().dmg_bonus == 0.5  # 没有个人额外 75%
+        assert mate.final_stats().dmg_bonus == 0.5
+
+    def test_e4_wan_extra_damage(self):
+        """E4：万淬心我方全体增伤额外 +50%。"""
+        char, sim, module = self._with_all_traces(rank=4)
+        module.rage = True
+        module._apply_wan_buffs(sim, char)
+        # 无虚无队友：0.5(万淬心) + 0.5(E4) + 0.75(个人额外)
+        assert char.final_stats().dmg_bonus == 1.75

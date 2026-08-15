@@ -47,6 +47,7 @@ class BaseStats:
     effect_res: float = 0.0
     energy_regen: float = 0.0     # 能量恢复效率（小数，如 0.1944 = +19.44%）
     outgoing_heal: float = 0.0    # 治疗量加成（小数；模拟器暂无治疗模型）
+    incoming_heal: float = 0.0    # 受到治疗提高（小数；治疗模型接入时使用）
     res_pen: float = 0.0          # 全属性抗性穿透（小数，如 0.12 = +12%）
     energy_max: float = 100.0     # 能量上限
     aggro: float = 100.0          # 仇恨值
@@ -81,6 +82,7 @@ class StatBonus:
     effect_res: float = 0.0
     energy_regen: float = 0.0       # 能量恢复效率（小数）
     outgoing_heal: float = 0.0      # 治疗量加成（小数；模拟器暂无治疗模型）
+    incoming_heal: float = 0.0      # 受到治疗提高（小数；治疗模型接入时使用）
     res_pen: float = 0.0            # 全属性抗性穿透（小数）
 
     # 固定值加成
@@ -136,6 +138,7 @@ class FinalStats:
     good_joke: float
     energy_regen: float = 0.0      # 能量恢复效率（小数；带默认，避免破坏全关键字构造）
     outgoing_heal: float = 0.0     # 治疗量加成（小数；模拟器暂无治疗模型）
+    incoming_heal: float = 0.0     # 受到治疗提高（小数；治疗模型接入时使用）
     res_pen: float = 0.0           # 全属性抗性穿透（小数）
 
 
@@ -171,6 +174,7 @@ class StatCalculator:
             effect_res=b.effect_res + s.effect_res,
             energy_regen=b.energy_regen + s.energy_regen,
             outgoing_heal=b.outgoing_heal + s.outgoing_heal,
+            incoming_heal=b.incoming_heal + s.incoming_heal,
             res_pen=b.res_pen + s.res_pen,
             energy_max=b.energy_max,
             aggro=b.aggro,

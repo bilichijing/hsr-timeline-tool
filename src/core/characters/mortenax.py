@@ -13,7 +13,13 @@
   目标煞火缠身 + 充能 +1；充能达 #1（9）点且生命 >1 时消耗充能、
   恢复 #2（15）点能量、额外施放 1 次战技（视为追加攻击）。
   充能不足或生命 ≤1 无法施放时，充能保留（封顶 #1）。
-- 致命攻击免死（解除结界并回复 #6 生命）：无我方受击模型，TODO。
+- 【百炼骨】：可积攒最多 80 点溢出能量，终结技后返还；战斗开始/结界解除
+  能量不足 75% 时立即恢复至 75%；能量恢复至上限时净化自身负面效果。
+- 【千锻魂】：结界期间受伤降低 50%、受治疗提高 50%；受击后给攻击者
+  上【煞火缠身】并充能 +1（嘲讽概率提高不建模）。
+- 【万淬心】：结界期间我方全体增伤；有除千冶外的虚无队友时我方终结技
+  增伤，否则千冶自身额外增伤。E4 使万淬心全体增伤额外提高。
+- 致命攻击免死（解除结界并回复 #6 生命）：暂未建模。
 
 技能（nanoka ID，参数经 skill.params 读取，#N → params[N-1]）：
 - 150701 普攻「残锋，掠尽」：#1 25% 生命上限
@@ -28,9 +34,9 @@
 - 150709 强化战技「刃下，归葬」：desc 为空，效果同 150702（仅解锁）
 - 150714 强化终结技「千冶铸一，万劫烬灭」：#1 210% 生命上限全体
 
-未建模（TODO，无我方受击模型）：
+未建模（TODO）：
 - 致命攻击免死（结界内受致命伤：解除结界、回复 50% 生命）
-- 普攻/秘技的嘲讽、秘技自身减伤 90%
+- 千锻魂嘲讽概率提高、普攻/秘技的嘲讽、秘技自身减伤 90%
 - 战技额外段与强化终结技的削韧（show_stance_list 第二项语义待勘探）
 """
 
@@ -40,7 +46,7 @@ from typing import TYPE_CHECKING
 
 from ..buff import Buff, BuffDuration, StackRule
 from ..damage import DamageType
-from ..eidolon import get_rank_param
+from ..eidolon import get_rank_param, has_rank
 from ..skill import SkillEffect, SkillType, get_skill_by_type
 from . import register
 from .base import CharacterModule, module_params
@@ -69,6 +75,14 @@ BLAZE_TURNS = 2
 # （正常从行迹额外能力 param_list[0] 读取，数据缺失时使用）
 TRACE_ENERGY_RATIO = 0.75
 TRACE_EXTRA_NAME = "百炼骨"
+TRACE_OVERFLOW_MAX = 80.0
+TRACE_WAN_NAME = "万淬心"
+TRACE_WAN_ALL_DMG = 0.5
+TRACE_WAN_ULTRA_DMG = 0.75
+TRACE_WAN_SELF_EXTRA = 0.75
+TRACE_QIANDUAN_NAME = "千锻魂"
+TRACE_QIANDUAN_DAMAGE_REDUCE = 0.5
+TRACE_QIANDUAN_INCOMING_HEAL = 0.5
 
 
 @register
@@ -104,6 +118,20 @@ class MortenaxModule(CharacterModule):
     # E6：受到伤害/消耗生命充能去重键（每个外部攻击来源或行动只计 1 次）
     _e6_charge_tokens: set[str] = set()
 
+    # ── 行迹状态 ─────────────────────────────────────────
+    # 百炼骨
+    overflow_energy_max: float = TRACE_OVERFLOW_MAX
+    # 万淬心
+    wan_all_dmg: float = TRACE_WAN_ALL_DMG       # 结界期间我方全体增伤
+    wan_ultra_dmg: float = TRACE_WAN_ULTRA_DMG   # 有虚无队友时，我方全体终结技增伤
+    wan_self_extra: float = TRACE_WAN_SELF_EXTRA # 无虚无队友时，千冶额外增伤
+    wan_nihility_teammate: bool = False
+    wan_enabled: bool = False
+    # 千锻魂
+    qian_damage_reduce: float = TRACE_QIANDUAN_DAMAGE_REDUCE
+    qian_incoming_heal: float = TRACE_QIANDUAN_INCOMING_HEAL
+    qian_enabled: bool = False
+
     # ── 事件钩子 ─────────────────────────────────────────
 
     def on_battle_start(self, sim: BattleSimulator, char: CharacterUnit) -> None:
@@ -116,6 +144,8 @@ class MortenaxModule(CharacterModule):
         self._e6_charge_tokens = set()
         # 【百炼骨】额外能力：战斗开始时若能量不足 75% 则立刻恢复至 75%
         self._read_trace_params(char)
+        char.overflow_energy = 0.0
+        char.overflow_energy_max = self.overflow_energy_max
         self._regen_energy_to_ratio(sim, char)
 
         # 星魂参数
@@ -131,6 +161,9 @@ class MortenaxModule(CharacterModule):
             get_rank_param(char.ranks_raw, 6, 0, 1.0)
             if self.eidolon_rank >= 6 else 1.0
         )
+        # E4：【万淬心】使我方目标造成的伤害额外提高 50%
+        if self.wan_enabled and self.eidolon_rank >= 4 and has_rank(char.ranks_raw, 4):
+            self.wan_all_dmg += get_rank_param(char.ranks_raw, 4, 0, 0.5)
         self._e1_res_original = {}
 
     def on_resolve_skill(
@@ -168,6 +201,21 @@ class MortenaxModule(CharacterModule):
         target: EnemyState | None,
         log: ActionLog,
     ) -> None:
+        # 万淬心：有除千冶外的虚无队友时，结界期间我方全体终结技增伤
+        if (
+            self.rage and self.wan_enabled and self.wan_nihility_teammate
+            and skill.skill_type == SkillType.ULTRA and self.wan_ultra_dmg > 0
+        ):
+            char.buff_mgr.add(Buff(
+                id=f"mort_wan_ultra_{char.unit_id}",
+                name="万淬心·终结技",
+                stat="dmg_bonus",
+                value=self.wan_ultra_dmg,
+                duration_type=BuffDuration.PERMANENT,
+                duration_count=-1,
+                source_unit=char.unit_id,
+                stack_rule=StackRule.NO_STACK_SAME_NAME,
+            ))
         skill_id = str(skill.id)
         if skill_id == SKILL_ULTRA_OPEN:
             self._on_ultra_open(sim, char, skill, log)
@@ -239,6 +287,10 @@ class MortenaxModule(CharacterModule):
         elif skill_id == SKILL_ULTRA_ENH:
             self._deal_ultra_enh(sim, char, skill, log)
 
+        # 万淬心：终结技临时增伤在本次终结技结算完毕后移除
+        if skill.skill_type == SkillType.ULTRA:
+            char.buff_mgr.remove(f"mort_wan_ultra_{char.unit_id}")
+
     def on_countdown(self, sim: BattleSimulator, char: CharacterUnit, log: ActionLog) -> None:
         """倒计时回合开始：结界解除、退出无量忿怒。"""
         self._exit_rage(sim, char)
@@ -265,6 +317,22 @@ class MortenaxModule(CharacterModule):
         """煞火缠身目标死亡：移除其状态记录（敌对象已离场，无需撤销贡献）。"""
         self.blaze.pop(enemy.unit_id, None)
 
+    def on_incoming_damage(
+        self,
+        sim: BattleSimulator,
+        char: CharacterUnit,
+        amount: float,
+        source: Any,
+        context: Any = None,
+    ) -> float:
+        """千锻魂：结界持续期间，自身受到的伤害降低 50%。"""
+        if (
+            char.unit_id == self.unit_id and self.rage
+            and self.qian_enabled and amount > 0
+        ):
+            return amount * (1 - self.qian_damage_reduce)
+        return amount
+
     def on_damage_taken(
         self,
         sim: BattleSimulator,
@@ -273,21 +341,31 @@ class MortenaxModule(CharacterModule):
         source: Any,
         context: Any = None,
     ) -> None:
-        """E6：我方受击模型——受到伤害时获得 1 点充能。
+        """千锻魂 + E6：受到攻击后，使对应目标陷入煞火缠身并获得 1 点充能。
 
-        每个敌方攻击来源只触发一次；“任意目标回合结束后可再次触发”
-        在当前配置式敌方攻击模型中由来源唯一性近似（同一攻击条目不会重复）。
+        以单次敌方攻击行动为单位去重；“任意目标回合结束后可再次触发”
+        在当前配置式敌方攻击模型中近似为每次敌方攻击行动可触发一次。
         """
-        if self.eidolon_rank < 6 or amount <= 0 or char.unit_id != self.unit_id:
+        if amount <= 0 or char.unit_id != self.unit_id or not self.rage:
             return
-        # 以单次敌方攻击行动为单位去重（context 是攻击调度条目）。
-        # “任意目标回合结束后可再次触发”在当前模型中近似为：
-        # 每次配置的敌方攻击行动都可触发一次。
         key = f"hit:{getattr(context, 'unit_id', getattr(source, 'unit_id', id(source)))}"
-        if key in self._e6_charge_tokens:
+        # 千锻魂：受击后给攻击者上煞火缠身并充能
+        if self.qian_enabled:
+            if source is not None and getattr(source, "unit_id", "") in {
+                enemy.unit_id for enemy in sim.enemies
+            }:
+                self._apply_blaze(sim, char, source)
+            if key in self._e6_charge_tokens:
+                return
+            self._e6_charge_tokens.add(key)
+            self._gain_charge(sim, char)
             return
-        self._e6_charge_tokens.add(key)
-        self._gain_charge(sim, char)
+        # 无千锻魂数据时，E6 仍可让受击充能
+        if self.eidolon_rank >= 6:
+            if key in self._e6_charge_tokens:
+                return
+            self._e6_charge_tokens.add(key)
+            self._gain_charge(sim, char)
 
     def enemy_buffs(
         self,
@@ -318,28 +396,115 @@ class MortenaxModule(CharacterModule):
         return None
 
     def _read_trace_params(self, char: CharacterUnit) -> None:
-        """读取【百炼骨】额外能力参数（param_list[0] = 能量恢复比例）。"""
+        """读取【百炼骨】与【万淬心】额外能力参数。"""
         ratio = TRACE_ENERGY_RATIO
+        overflow_max = TRACE_OVERFLOW_MAX
+        wan_all = TRACE_WAN_ALL_DMG
+        wan_ultra = TRACE_WAN_ULTRA_DMG
+        wan_self = TRACE_WAN_SELF_EXTRA
+        qian_reduce = TRACE_QIANDUAN_DAMAGE_REDUCE
+        qian_heal = TRACE_QIANDUAN_INCOMING_HEAL
+        wan_found = False
+        qian_found = False
         for group in char.skill_trees_raw.values():
             if not isinstance(group, dict):
                 continue
             for point in group.values():
-                if not isinstance(point, dict):
+                if not isinstance(point, dict) or point.get("point_type") != 3:
                     continue
-                if (
-                    point.get("point_type") == 3
-                    and point.get("point_name") == TRACE_EXTRA_NAME
-                    and point.get("param_list")
-                ):
-                    ratio = float(point["param_list"][0])
-                    break
+                params = point.get("param_list") or []
+                name = str(point.get("point_name", ""))
+                if name == TRACE_EXTRA_NAME:
+                    if params:
+                        ratio = float(params[0])
+                    if len(params) >= 2:
+                        overflow_max = float(params[1])
+                elif name == TRACE_WAN_NAME:
+                    wan_found = True
+                    if len(params) >= 1:
+                        wan_all = float(params[0])
+                    if len(params) >= 2:
+                        wan_ultra = float(params[1])
+                    if len(params) >= 3:
+                        wan_self = float(params[2])
+                elif name == TRACE_QIANDUAN_NAME:
+                    qian_found = True
+                    if len(params) >= 2:
+                        qian_reduce = float(params[1])
+                    if len(params) >= 3:
+                        qian_heal = float(params[2])
         self.energy_ratio = ratio
+        self.overflow_energy_max = overflow_max
+        self.wan_all_dmg = wan_all
+        self.wan_ultra_dmg = wan_ultra
+        self.wan_self_extra = wan_self
+        self.qian_damage_reduce = qian_reduce
+        self.qian_incoming_heal = qian_heal
+        self.wan_enabled = wan_found
+        self.qian_enabled = qian_found
 
     def _regen_energy_to_ratio(self, sim: BattleSimulator, char: CharacterUnit) -> None:
         """【百炼骨】：能量不足该比例（默认 75%）则立刻恢复至该比例。"""
         target = char.base_stats.energy_max * self.energy_ratio
         if char.energy < target:
             char.energy = target
+
+    def _apply_wan_buffs(self, sim: BattleSimulator, char: CharacterUnit) -> None:
+        """【万淬心】：结界期间我方全体增伤，并根据队伍命途选择分支。"""
+        if not self.wan_enabled:
+            return
+        self.wan_nihility_teammate = any(
+            c.path == "Warlock" and c.unit_id != self.unit_id
+            for c in sim.characters
+        )
+        for ally in sim.characters:
+            ally.buff_mgr.add(Buff(
+                id="mort_wan_all_dmg",
+                name="万淬心",
+                stat="dmg_bonus",
+                value=self.wan_all_dmg,
+                duration_type=BuffDuration.PERMANENT,
+                duration_count=-1,
+                source_unit=self.unit_id,
+                stack_rule=StackRule.NO_STACK_SAME_NAME,
+            ))
+        # 无除千冶外的虚无队友：千冶自身伤害额外提高
+        if not self.wan_nihility_teammate and self.wan_self_extra > 0:
+            char.buff_mgr.add(Buff(
+                id="mort_wan_self_extra",
+                name="万淬心·额外",
+                stat="dmg_bonus",
+                value=self.wan_self_extra,
+                duration_type=BuffDuration.PERMANENT,
+                duration_count=-1,
+                source_unit=self.unit_id,
+                stack_rule=StackRule.NO_STACK_SAME_NAME,
+            ))
+
+    def _remove_wan_buffs(self, sim: BattleSimulator) -> None:
+        for ally in sim.characters:
+            ally.buff_mgr.remove("mort_wan_all_dmg")
+            ally.buff_mgr.remove("mort_wan_self_extra")
+            ally.buff_mgr.remove(f"mort_wan_ultra_{ally.unit_id}")
+
+    def _apply_qian_duan_buffs(self, char: CharacterUnit) -> None:
+        """【千锻魂】：结界期间受到治疗提高；受伤降低由钩子处理；嘲讽跳过。"""
+        if not self.qian_enabled:
+            return
+        char.buff_mgr.add(Buff(
+            id="mort_qian_duan_incoming_heal",
+            name="千锻魂",
+            stat="incoming_heal",
+            value=self.qian_incoming_heal,
+            duration_type=BuffDuration.PERMANENT,
+            duration_count=-1,
+            source_unit=self.unit_id,
+            stack_rule=StackRule.NO_STACK_SAME_NAME,
+        ))
+
+    def _remove_qian_duan_buffs(self, sim: BattleSimulator) -> None:
+        for ally in sim.characters:
+            ally.buff_mgr.remove("mort_qian_duan_incoming_heal")
 
     def _gain_charge(self, sim: BattleSimulator, char: CharacterUnit) -> None:
         """充能 +1（封顶需求值）并尝试触发天赋。"""
@@ -348,7 +513,7 @@ class MortenaxModule(CharacterModule):
 
     def _e6_charge_from_hp_loss(self, sim: BattleSimulator, char: CharacterUnit) -> None:
         """E6：消耗生命值时获得 1 点充能（按行动 token 去重）。"""
-        if self.eidolon_rank < 6:
+        if self.eidolon_rank < 6 or not self.rage:
             return
         key = f"hp:{sim.action_token}"
         if key in self._e6_charge_tokens:
@@ -397,6 +562,8 @@ class MortenaxModule(CharacterModule):
         # 无量忿怒：暴击率 #2、暴伤 #3
         self.rage = True
         self._apply_e1_res(sim)
+        self._apply_wan_buffs(sim, char)
+        self._apply_qian_duan_buffs(char)
         char.buff_mgr.add(Buff(
             id=f"rage_crit_rate_{char.unit_id}",
             name="无量忿怒",
@@ -552,6 +719,8 @@ class MortenaxModule(CharacterModule):
         self.rage = False
         self.countdown_unit_id = ""
         self._restore_e1_res(sim)
+        self._remove_wan_buffs(sim)
+        self._remove_qian_duan_buffs(sim)
         char.buff_mgr.remove_by_name("无量忿怒")
         # 【百炼骨】：结界解除时若能量不足 75% 则立刻恢复至 75%
         self._regen_energy_to_ratio(sim, char)

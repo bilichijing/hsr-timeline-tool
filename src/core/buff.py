@@ -65,6 +65,8 @@ class Buff:
     stack_rule: StackRule = StackRule.NO_STACK_SAME_NAME
     max_stacks: int = 1                  # STACK_LIMIT_N 时生效
     current_stacks: int = 1              # 当前层数
+    # 是否为负面效果（debuff）。千冶【百炼骨】“解除自身所有负面效果”使用。
+    is_debuff: bool = False
     # TURNS_SELF_END 特殊规则标志：
     # 若本 buff 是在自身回合内获得的，则获得它的这个回合结束时
     # 持续时间不会减少（首次 tick_turn_end 跳过扣减）。
@@ -191,6 +193,12 @@ class BuffManager:
     def remove_by_name(self, name: str) -> None:
         """按名称移除 buff。"""
         self.buffs = [b for b in self.buffs if b.name != name]
+
+    def remove_debuffs(self) -> int:
+        """移除所有负面效果，返回移除数量。"""
+        before = len(self.buffs)
+        self.buffs = [b for b in self.buffs if not b.is_debuff]
+        return before - len(self.buffs)
 
     def clear_expired(self) -> int:
         """清除过期 buff，返回清除数量。"""
