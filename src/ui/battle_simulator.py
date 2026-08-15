@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import sys
 from dataclasses import asdict, dataclass, field
@@ -106,6 +107,9 @@ ACTION_NAMES_ZH: dict[str, str] = {
 
 # 配置缓存文件（cache 目录已 gitignore）
 CONFIG_PATH = Path("./cache/team_config.json")
+
+# 侧栏行动预览窗口：只展示从当前总行动值起 150 AV 内的行动
+PREVIEW_AV_WINDOW = 150.0
 
 
 # ── 队伍表格行数据与列号 ──────────────────────────────────
@@ -428,26 +432,32 @@ def make_preset_character(
 
 
 def make_card(title: str, value: str, color: str = Colors.GOLD) -> QFrame:
-    """构造一个数据卡片（标题 + 数值）。"""
+    """构造一个带强调色描边的数据卡片（标题 + 数值）。"""
     card = QFrame()
     card.setObjectName("card")
     card.setStyleSheet(f"""
         QFrame#card {{
-            background-color: {Colors.BG_CARD};
+            background: qlineargradient(
+                x1: 0, y1: 0, x2: 0, y2: 1,
+                stop: 0 {Colors.BG_CARD},
+                stop: 1 {Colors.BG_PANEL}
+            );
             border: 1px solid {Colors.BORDER};
-            border-radius: 8px;
-            padding: 12px;
+            border-left: 3px solid {color};
+            border-radius: 9px;
         }}
     """)
     layout = QVBoxLayout(card)
-    layout.setContentsMargins(12, 10, 12, 10)
-    layout.setSpacing(4)
+    layout.setContentsMargins(14, 10, 12, 10)
+    layout.setSpacing(3)
 
     title_label = QLabel(title)
-    title_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: 11px; border: none;")
+    title_label.setStyleSheet(
+        f"color: {Colors.TEXT_SECONDARY}; font-size: 11px; border: none;"
+    )
     value_label = QLabel(value)
     value_label.setStyleSheet(
-        f"color: {color}; font-size: 20px; font-weight: 700; border: none;"
+        f"color: {color}; font-size: 21px; font-weight: 800; border: none;"
     )
     layout.addWidget(title_label)
     layout.addWidget(value_label)
@@ -484,6 +494,7 @@ class BattleSimulatorWindow(QMainWindow):
         self._load_default_config()
         # 配置缓存：有则自动恢复上次关闭时的全部配置
         self._load_config()
+        self._update_action_preview()
 
     # ── UI 初始化 ─────────────────────────────────────
 
@@ -501,49 +512,93 @@ class BattleSimulatorWindow(QMainWindow):
         root.addWidget(self._build_main_area(), stretch=1)
 
     def _build_sidebar(self) -> QWidget:
-        """左侧栏：标题 + 队伍概览 + 操作按钮。"""
+        """左侧栏：品牌头图 + 队伍概览 + 未来行动预览 + 操作按钮。"""
         sidebar = QWidget()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(260)
-        # 用 objectName 限定样式范围，避免级联覆盖子控件
+        sidebar.setFixedWidth(300)
         sidebar.setStyleSheet(
             f"QWidget#sidebar {{ background-color: {Colors.BG_DEEPEST}; }}"
         )
         layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(16, 20, 16, 16)
-        layout.setSpacing(16)
+        layout.setContentsMargins(16, 18, 16, 14)
+        layout.setSpacing(10)
 
-        # 标题
-        title = QLabel("星铁排轴工具")
-        title.setObjectName("title")
-        title.setStyleSheet(
-            f"QLabel#title {{ color: {Colors.GOLD}; font-size: 18px; font-weight: 700; border: none; }}"
-        )
-        layout.addWidget(title)
+        # ── 品牌头图 ──────────────────────────────────
+        header = QFrame()
+        header.setObjectName("sidebarHeader")
+        header_layout = QVBoxLayout(header)
+        header_layout.setContentsMargins(14, 12, 14, 12)
+        header_layout.setSpacing(3)
 
-        subtitle = QLabel("战斗模拟器")
-        subtitle.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: 11px;")
-        layout.addWidget(subtitle)
+        brand = QLabel("✦  星铁排轴工具")
+        brand.setObjectName("sidebarBrand")
+        header_layout.addWidget(brand)
 
-        # 分隔线
-        layout.addWidget(self._make_separator())
+        sub = QLabel("HONKAI: STAR RAIL · TIMELINE LAB")
+        sub.setObjectName("sidebarSub")
+        header_layout.addWidget(sub)
+        layout.addWidget(header)
 
-        # 队伍概览
+        # ── 队伍概览 ──────────────────────────────────
         overview_label = QLabel("队伍概览")
-        overview_label.setStyleSheet(
-            f"color: {Colors.GOLD}; font-size: 13px; font-weight: 600;"
-        )
+        overview_label.setObjectName("sectionLabel")
         layout.addWidget(overview_label)
 
         self.overview_container = QWidget()
         self.overview_layout = QVBoxLayout(self.overview_container)
         self.overview_layout.setContentsMargins(0, 0, 0, 0)
-        self.overview_layout.setSpacing(8)
+        self.overview_layout.setSpacing(6)
         layout.addWidget(self.overview_container)
 
-        layout.addStretch()
+        # ── 未来 150 AV 行动预览 ─────────────────────
+        preview_panel = QFrame()
+        preview_panel.setObjectName("previewPanel")
+        preview_layout = QVBoxLayout(preview_panel)
+        preview_layout.setContentsMargins(10, 10, 10, 10)
+        preview_layout.setSpacing(6)
 
-        # 操作按钮
+        preview_title_row = QHBoxLayout()
+        preview_title = QLabel("未来 150 AV 行动")
+        preview_title.setStyleSheet(
+            f"color: {Colors.GOLD}; font-size: 12px; font-weight: 700; border: none;"
+        )
+        preview_title_row.addWidget(preview_title)
+        live_badge = QLabel("实时")
+        live_badge.setObjectName("liveBadge")
+        live_badge.setAlignment(Qt.AlignCenter)
+        preview_title_row.addWidget(live_badge)
+        preview_title_row.addStretch()
+        preview_layout.addLayout(preview_title_row)
+
+        self.preview_range_label = QLabel("开始交互模拟后显示")
+        self.preview_range_label.setObjectName("previewRange")
+        preview_layout.addWidget(self.preview_range_label)
+
+        self.action_preview_table = QTableWidget(0, 4)
+        self.action_preview_table.setHorizontalHeaderLabels(["#", "行动者", "+AV", "总AV"])
+        self.action_preview_table.setFixedHeight(180)
+        self.action_preview_table.setShowGrid(False)
+        self.action_preview_table.setAlternatingRowColors(True)
+        self.action_preview_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.action_preview_table.setSelectionMode(QTableWidget.NoSelection)
+        self.action_preview_table.setFocusPolicy(Qt.NoFocus)
+        self.action_preview_table.verticalHeader().setVisible(False)
+        self.action_preview_table.verticalHeader().setDefaultSectionSize(25)
+        self.action_preview_table.horizontalHeader().setSectionResizeMode(QHeaderView.Fixed)
+        self.action_preview_table.setColumnWidth(0, 26)
+        self.action_preview_table.setColumnWidth(1, 112)
+        self.action_preview_table.setColumnWidth(2, 50)
+        self.action_preview_table.setColumnWidth(3, 54)
+        self.action_preview_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.action_preview_table.setToolTip(
+            "基于当前行动队列的静态预测；角色技能造成的推拉条/速度变化以实际结算为准"
+        )
+        preview_layout.addWidget(self.action_preview_table)
+        layout.addWidget(preview_panel)
+
+        layout.addStretch(1)
+
+        # ── 底部操作 ──────────────────────────────────
         self.run_btn = QPushButton("▶  运行模拟")
         self.run_btn.setObjectName("primaryBtn")
         self.run_btn.setMinimumHeight(40)
@@ -552,7 +607,7 @@ class BattleSimulatorWindow(QMainWindow):
         layout.addWidget(self.run_btn)
 
         self.reset_btn = QPushButton("↻  重置配置")
-        self.reset_btn.setMinimumHeight(36)
+        self.reset_btn.setMinimumHeight(34)
         self.reset_btn.setCursor(Qt.PointingHandCursor)
         self.reset_btn.clicked.connect(self._load_default_config)
         layout.addWidget(self.reset_btn)
@@ -568,31 +623,20 @@ class BattleSimulatorWindow(QMainWindow):
             f"QWidget#mainArea {{ background-color: {Colors.BG_DARK}; }}"
         )
         layout = QVBoxLayout(main)
-        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setContentsMargins(16, 14, 16, 16)
+        layout.setSpacing(0)
 
         self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
         layout.addWidget(self.tabs)
 
-        # Tab 1: 配置
-        self.tabs.addTab(self._build_config_tab(), "配置")
-
-        # Tab 2: 交互模拟
-        self.tabs.addTab(self._build_interactive_tab(), "交互模拟")
-
-        # Tab 3: 行动日志
-        self.tabs.addTab(self._build_log_tab(), "行动日志")
-
-        # Tab 3: AV 时间轴
-        self.tabs.addTab(self._build_timeline_tab(), "AV 时间轴")
-
-        # Tab 4: 伤害占比
-        self.tabs.addTab(self._build_pie_tab(), "伤害占比")
-
-        # Tab 5: 伤害明细
-        self.tabs.addTab(self._build_detail_tab(), "伤害明细")
-
-        # Tab 6: 汇总
-        self.tabs.addTab(self._build_summary_tab(), "汇总")
+        self.tabs.addTab(self._build_config_tab(), "⚙  配置")
+        self.tabs.addTab(self._build_interactive_tab(), "▶  交互模拟")
+        self.tabs.addTab(self._build_log_tab(), "☰  行动日志")
+        self.tabs.addTab(self._build_timeline_tab(), "◔  AV 时间轴")
+        self.tabs.addTab(self._build_pie_tab(), "◔  伤害占比")
+        self.tabs.addTab(self._build_detail_tab(), "≡  伤害明细")
+        self.tabs.addTab(self._build_summary_tab(), "✦  汇总")
 
         return main
 
@@ -939,7 +983,7 @@ class BattleSimulatorWindow(QMainWindow):
         layout = QVBoxLayout(page)
         hint = QLabel("横轴为累计总行动值，悬停行动点可查看详情")
         hint.setAlignment(Qt.AlignCenter)
-        hint.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: 20px;")
+        hint.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: 12px;")
         layout.addWidget(hint)
 
         self.gantt_widget = TimelineGanttWidget()
@@ -1081,6 +1125,7 @@ class BattleSimulatorWindow(QMainWindow):
             if not name_item or not name_item.text().strip():
                 continue
             name = name_item.text().strip()
+
             # 命途/属性从行数据读取（表格不显示这两列）
             row_data = name_item.data(Qt.UserRole)
             if isinstance(row_data, _RowCharData) and row_data.path:
@@ -1090,35 +1135,72 @@ class BattleSimulatorWindow(QMainWindow):
             else:
                 path_en, elem_en, path_zh, elem_zh = "", "", "", ""
 
-            # 颜色
-            path_color = PATH_COLORS.get(path_en, Colors.TEXT_PRIMARY)
-            elem_color = ELEMENT_COLORS.get(elem_en, Colors.TEXT_PRIMARY)
+            path_color = PATH_COLORS.get(path_en, Colors.TEXT_SECONDARY)
+            elem_color = ELEMENT_COLORS.get(elem_en, Colors.TEXT_SECONDARY)
+
+            speed_item = self.team_table.item(row, COL_SPD)
+            speed_text = speed_item.text().strip() if speed_item and speed_item.text().strip() else "-"
 
             card = QFrame()
             card.setObjectName("overviewCard")
             card.setStyleSheet(f"""
                 QFrame#overviewCard {{
-                    background-color: {Colors.BG_CARD};
-                    border: 1px solid {Colors.BORDER};
-                    border-radius: 6px;
-                    padding: 8px;
+                    border-left: 3px solid {path_color or Colors.GOLD};
                 }}
             """)
             card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(10, 6, 10, 6)
-            card_layout.setSpacing(2)
+            card_layout.setContentsMargins(8, 5, 8, 5)
+            card_layout.setSpacing(3)
+
+            # 第一行：头像 + 名称 + 速度
+            top_row = QHBoxLayout()
+            top_row.setSpacing(7)
+
+            avatar = QLabel(name[:1])
+            avatar.setObjectName("charAvatar")
+            avatar.setFixedSize(26, 26)
+            avatar.setAlignment(Qt.AlignCenter)
+            avatar.setStyleSheet(f"background-color: {elem_color};")
+            top_row.addWidget(avatar)
 
             name_label = QLabel(name)
             name_label.setStyleSheet(
-                f"color: {Colors.TEXT_PRIMARY}; font-weight: 600; font-size: 13px; border: none;"
+                f"color: {Colors.TEXT_PRIMARY}; font-weight: 700; font-size: 12px; border: none;"
             )
-            card_layout.addWidget(name_label)
+            top_row.addWidget(name_label)
+            top_row.addStretch()
 
-            tag_label = QLabel(f"{path_zh}  ·  {elem_zh}")
-            tag_label.setStyleSheet(
-                f"color: {path_color}; font-size: 11px; border: none;"
+            speed_label = QLabel(f"{speed_text}")
+            speed_label.setToolTip("速度")
+            speed_label.setStyleSheet(
+                f"color: {Colors.CYAN}; font-size: 10px; font-weight: 700; border: none;"
             )
-            card_layout.addWidget(tag_label)
+            top_row.addWidget(speed_label)
+            card_layout.addLayout(top_row)
+
+            # 第二行：命途 / 属性
+            tag_row = QHBoxLayout()
+            tag_row.setSpacing(4)
+            if path_zh:
+                path_dot = QLabel("●")
+                path_dot.setStyleSheet(f"color: {path_color}; font-size: 9px; border: none;")
+                tag_row.addWidget(path_dot)
+                path_label = QLabel(path_zh)
+                path_label.setStyleSheet(
+                    f"color: {path_color}; font-size: 10px; font-weight: 600; border: none;"
+                )
+                tag_row.addWidget(path_label)
+            if elem_zh:
+                sep_label = QLabel("·")
+                sep_label.setStyleSheet(f"color: {Colors.TEXT_DISABLED}; border: none;")
+                tag_row.addWidget(sep_label)
+                elem_label = QLabel(elem_zh)
+                elem_label.setStyleSheet(
+                    f"color: {elem_color}; font-size: 10px; font-weight: 600; border: none;"
+                )
+                tag_row.addWidget(elem_label)
+            tag_row.addStretch()
+            card_layout.addLayout(tag_row)
 
             self.overview_layout.addWidget(card)
 
@@ -2155,6 +2237,145 @@ class BattleSimulatorWindow(QMainWindow):
                     sim.sp.can_consume(1)
                     or (skill_for_sp is not None and skill_for_sp.sp_cost <= 0)
                 )
+
+        # 侧栏：未来 150 AV 行动顺序实时预览
+        self._update_action_preview()
+
+    def _action_entry_kind(self, sim: BattleSimulator, actor) -> tuple[str, str]:
+        """判断行动条条目的业务类型与展示颜色。"""
+        if actor.unit_id == "__aha__":
+            return "阿哈时刻", Colors.GOLD
+        if actor.unit_id in sim._enemy_attack_map:
+            return "敌方攻击", Colors.RED
+        if actor.unit_id in sim.countdown_units:
+            return "倒计时", Colors.PURPLE
+        if actor.is_monster:
+            return "怪物", Colors.CYAN
+        return "角色", Colors.GREEN
+
+    def _predict_action_timeline(self, sim: BattleSimulator) -> list[dict]:
+        """基于当前行动队列静态预测未来 150 AV 内的行动顺序。
+
+        说明：这是 UI 层预估，不会修改模拟器状态。角色技能带来的
+        速度变化/推拉条/插队终结技需要实际结算后才会反映到下一次预览。
+        """
+        if not sim.action_queue.entries or sim.total_av >= sim.max_av:
+            return []
+
+        queue = copy.deepcopy(sim.action_queue)
+        actor = queue.next_actor()
+        window_end = min(sim.total_av + PREVIEW_AV_WINDOW, sim.max_av)
+
+        # 已推进到当前行动者时，下一次行动就是“现在”（相对 +0）
+        if sim.pending_av_actor == actor.unit_id:
+            total_av = sim.total_av
+        else:
+            total_av = sim.total_av + actor.current_av
+
+        items: list[dict] = []
+        safety = 0
+        while total_av <= window_end + 1e-9 and safety < 60:
+            kind, color = self._action_entry_kind(sim, actor)
+            items.append({
+                "name": actor.name,
+                "kind": kind,
+                "color": color,
+                "delta_av": total_av - sim.total_av,
+                "total_av": total_av,
+            })
+
+            queue.advance()
+            # 一次性行动（敌方攻击调度/倒计时）行动后离场，预测中同步移除
+            if (
+                actor.unit_id in sim._enemy_attack_map
+                or actor.unit_id in sim.countdown_units
+            ):
+                queue.remove(actor.unit_id)
+
+            if not queue.entries:
+                break
+            actor = queue.next_actor()
+            total_av += max(0.0, actor.current_av)
+            safety += 1
+
+        return items
+
+    def _update_action_preview(self) -> None:
+        """更新侧栏“未来 150 AV 行动”预览表。"""
+        table = self.action_preview_table
+        table.clearSpans()
+        table.setRowCount(0)
+
+        sim = self._interactive_sim
+        if sim is None:
+            self.preview_range_label.setText("开始交互模拟后显示")
+            table.setRowCount(1)
+            table.setItem(0, 0, QTableWidgetItem("—"))
+            placeholder = QTableWidgetItem("等待开始交互模拟")
+            placeholder.setForeground(QColor(Colors.TEXT_DISABLED))
+            table.setItem(0, 1, placeholder)
+            return
+
+        if not self._interactive_active:
+            self.preview_range_label.setText("战斗已结束" if sim else "暂无预览")
+            table.setRowCount(1)
+            table.setItem(0, 0, QTableWidgetItem("—"))
+            placeholder = QTableWidgetItem("暂无后续行动")
+            placeholder.setForeground(QColor(Colors.TEXT_DISABLED))
+            table.setItem(0, 1, placeholder)
+            return
+
+        window_end = min(sim.total_av + PREVIEW_AV_WINDOW, sim.max_av)
+        self.preview_range_label.setText(
+            f"总AV {sim.total_av:.1f} → {window_end:.1f}"
+        )
+
+        items = self._predict_action_timeline(sim)
+        if not items:
+            table.setRowCount(1)
+            table.setItem(0, 0, QTableWidgetItem("—"))
+            placeholder = QTableWidgetItem("暂无后续行动")
+            placeholder.setForeground(QColor(Colors.TEXT_DISABLED))
+            table.setItem(0, 1, placeholder)
+            return
+
+        table.setRowCount(len(items))
+        for i, item in enumerate(items):
+            is_next = i == 0
+
+            seq = QTableWidgetItem(f"{i + 1:02d}")
+            seq.setTextAlignment(Qt.AlignCenter)
+            seq.setForeground(QColor(Colors.GOLD if is_next else Colors.TEXT_SECONDARY))
+
+            name_item = QTableWidgetItem(item["name"])
+            name_item.setForeground(QColor(item["color"]))
+            name_item.setToolTip(
+                f"{item['kind']} · 预计总AV {item['total_av']:.1f}"
+            )
+
+            delta_text = "现在" if item["delta_av"] < 0.001 else f"+{item['delta_av']:.0f}"
+            delta_item = QTableWidgetItem(delta_text)
+            delta_item.setTextAlignment(Qt.AlignCenter)
+            delta_item.setForeground(QColor(Colors.GOLD if is_next else Colors.CYAN))
+
+            total_item = QTableWidgetItem(f"{item['total_av']:.1f}")
+            total_item.setTextAlignment(Qt.AlignCenter)
+            total_item.setForeground(QColor(Colors.TEXT_PRIMARY))
+
+            table.setItem(i, 0, seq)
+            table.setItem(i, 1, name_item)
+            table.setItem(i, 2, delta_item)
+            table.setItem(i, 3, total_item)
+
+            if is_next:
+                bg = QColor(Colors.BG_SELECTED)
+                for col in range(4):
+                    cell = table.item(i, col)
+                    if cell is not None:
+                        cell.setBackground(bg)
+                        font = cell.font()
+                        font.setBold(True)
+                        cell.setFont(font)
 
     def _rebuild_energy_orbs(self) -> None:
         """根据当前队伍重建能量图标（含角色头像）。"""

@@ -76,22 +76,34 @@ QWidget {{
     font-size: 13px;
 }}
 
-QMainWindow,
+QMainWindow {{
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 1, y2: 1,
+        stop: 0 {Colors.BG_DEEPEST},
+        stop: 0.45 {Colors.BG_DARK},
+        stop: 1 #0F1626
+    );
+}}
 QDialog {{
-    background-color: {Colors.BG_DEEPEST};
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 0, y2: 1,
+        stop: 0 {Colors.BG_DARK},
+        stop: 1 {Colors.BG_DEEPEST}
+    );
 }}
 
 /* ── 滚动条 ───────────────────────────────────── */
 QScrollBar:vertical {{
-    background: {Colors.BG_DARK};
+    background: transparent;
     width: 10px;
-    margin: 0;
+    margin: 2px;
     border-radius: 5px;
 }}
 QScrollBar::handle:vertical {{
     background: {Colors.BG_HOVER};
     min-height: 30px;
     border-radius: 5px;
+    border: 1px solid {Colors.BORDER};
 }}
 QScrollBar::handle:vertical:hover {{
     background: {Colors.BG_SELECTED};
@@ -101,15 +113,16 @@ QScrollBar::sub-line:vertical {{
     height: 0;
 }}
 QScrollBar:horizontal {{
-    background: {Colors.BG_DARK};
+    background: transparent;
     height: 10px;
-    margin: 0;
+    margin: 2px;
     border-radius: 5px;
 }}
 QScrollBar::handle:horizontal {{
     background: {Colors.BG_HOVER};
     min-width: 30px;
     border-radius: 5px;
+    border: 1px solid {Colors.BORDER};
 }}
 QScrollBar::handle:horizontal:hover {{
     background: {Colors.BG_SELECTED};
@@ -121,41 +134,58 @@ QScrollBar::sub-line:horizontal {{
 
 /* ── 按钮 ─────────────────────────────────────── */
 QPushButton {{
-    background-color: {Colors.BG_CARD};
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 0, y2: 1,
+        stop: 0 {Colors.BG_CARD},
+        stop: 1 {Colors.BG_PANEL}
+    );
     color: {Colors.TEXT_PRIMARY};
     border: 1px solid {Colors.BORDER};
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 7px 16px;
     font-weight: 500;
 }}
 QPushButton:hover {{
-    background-color: {Colors.BG_HOVER};
+    background: {Colors.BG_HOVER};
     border-color: {Colors.CYAN};
 }}
 QPushButton:pressed {{
-    background-color: {Colors.BG_SELECTED};
+    background: {Colors.BG_SELECTED};
+    border-color: {Colors.CYAN};
 }}
 QPushButton:disabled {{
     color: {Colors.TEXT_DISABLED};
-    background-color: {Colors.BG_PANEL};
+    background: {Colors.BG_PANEL};
     border-color: {Colors.BG_PANEL};
 }}
 QPushButton#primaryBtn {{
-    background-color: {Colors.GOLD};
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 1, y2: 0,
+        stop: 0 #C89A45,
+        stop: 0.5 {Colors.GOLD},
+        stop: 1 #E4C06B
+    );
     color: {Colors.BG_DEEPEST};
-    border: none;
+    border: 1px solid #E4C06B;
     font-weight: 700;
     padding: 10px 20px;
     min-height: 22px;
 }}
 QPushButton#primaryBtn:hover {{
-    background-color: {Colors.GOLD_HOVER};
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 1, y2: 0,
+        stop: 0 #D6A958,
+        stop: 0.5 {Colors.GOLD_HOVER},
+        stop: 1 #F0D08B
+    );
+    border-color: #F0D08B;
 }}
 QPushButton#primaryBtn:pressed {{
-    background-color: {Colors.GOLD_PRESSED};
+    background: {Colors.GOLD_PRESSED};
+    border-color: {Colors.GOLD_PRESSED};
 }}
 QPushButton#dangerBtn {{
-    background-color: transparent;
+    background: transparent;
     color: {Colors.RED};
     border: 1px solid {Colors.RED};
 }}
@@ -173,7 +203,7 @@ QComboBox {{
     background-color: {Colors.BG_PANEL};
     color: {Colors.TEXT_PRIMARY};
     border: 1px solid {Colors.BORDER};
-    border-radius: 5px;
+    border-radius: 6px;
     padding: 5px 8px;
     selection-background-color: {Colors.CYAN};
     selection-color: {Colors.BG_DEEPEST};
@@ -184,6 +214,7 @@ QTextEdit:focus,
 QSpinBox:focus,
 QComboBox:focus {{
     border: 1px solid {Colors.BORDER_FOCUS};
+    background-color: #121A2B;
 }}
 QComboBox::drop-down {{
     border: none;
@@ -193,7 +224,7 @@ QComboBox::down-arrow {{
     image: none;
     border-left: 4px solid transparent;
     border-right: 4px solid transparent;
-    border-top: 5px solid {Colors.TEXT_SECONDARY};
+    border-top: 5px solid {Colors.GOLD};
     margin-right: 6px;
 }}
 QSpinBox::up-button,
@@ -205,8 +236,8 @@ QSpinBox::down-button {{
 QComboBox QAbstractItemView {{
     background-color: {Colors.BG_CARD};
     color: {Colors.TEXT_PRIMARY};
-    border: 1px solid {Colors.BORDER};
-    border-radius: 5px;
+    border: 1px solid {Colors.BORDER_FOCUS};
+    border-radius: 6px;
     selection-background-color: {Colors.BG_SELECTED};
     outline: none;
     padding: 4px;
@@ -215,11 +246,11 @@ QComboBox QAbstractItemView {{
 /* ── 表格 ─────────────────────────────────────── */
 QTableWidget {{
     background-color: {Colors.BG_PANEL};
-    alternate-background-color: {Colors.BG_CARD};
+    alternate-background-color: #151C2D;
     color: {Colors.TEXT_PRIMARY};
     border: 1px solid {Colors.BORDER};
-    border-radius: 6px;
-    gridline-color: {Colors.BORDER};
+    border-radius: 8px;
+    gridline-color: #202A40;
     selection-background-color: {Colors.BG_SELECTED};
     selection-color: {Colors.TEXT_PRIMARY};
     outline: none;
@@ -230,14 +261,19 @@ QTableWidget::item {{
 }}
 QTableWidget::item:selected {{
     background-color: {Colors.BG_SELECTED};
+    color: #FFFFFF;
 }}
 QHeaderView::section {{
-    background-color: {Colors.BG_CARD};
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 0, y2: 1,
+        stop: 0 {Colors.BG_CARD},
+        stop: 1 {Colors.BG_DARK}
+    );
     color: {Colors.GOLD};
     padding: 8px 8px;
     border: none;
     border-right: 1px solid {Colors.BORDER};
-    border-bottom: 1px solid {Colors.BORDER};
+    border-bottom: 1px solid {Colors.GOLD_PRESSED};
     font-weight: 600;
 }}
 QTableCornerButton::section {{
@@ -250,21 +286,26 @@ QTableCornerButton::section {{
 QListWidget {{
     background-color: {Colors.BG_PANEL};
     border: 1px solid {Colors.BORDER};
-    border-radius: 6px;
+    border-radius: 8px;
     outline: none;
 }}
 QListWidget::item {{
-    background-color: {Colors.BG_CARD};
-    border-radius: 6px;
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 0, y2: 1,
+        stop: 0 {Colors.BG_CARD},
+        stop: 1 {Colors.BG_PANEL}
+    );
+    border: 1px solid {Colors.BORDER};
+    border-radius: 8px;
     margin: 4px;
     padding: 6px;
 }}
 QListWidget::item:hover {{
-    background-color: {Colors.BG_HOVER};
+    background: {Colors.BG_HOVER};
     border: 1px solid {Colors.CYAN};
 }}
 QListWidget::item:selected {{
-    background-color: {Colors.BG_SELECTED};
+    background: {Colors.BG_SELECTED};
     border: 1px solid {Colors.GOLD};
 }}
 
@@ -284,44 +325,102 @@ QLabel#subtitle {{
 }}
 QLabel#sectionLabel {{
     color: {Colors.GOLD};
-    font-size: 14px;
-    font-weight: 600;
-    padding: 4px 0;
+    font-size: 13px;
+    font-weight: 700;
+    padding: 2px 0;
+}}
+
+/* ── 侧栏专属组件 ─────────────────────────────── */
+QFrame#sidebarHeader {{
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 1, y2: 1,
+        stop: 0 #141C30,
+        stop: 0.5 #1C2338,
+        stop: 1 #251F2E
+    );
+    border: 1px solid {Colors.BORDER};
+    border-radius: 12px;
+}}
+QLabel#sidebarBrand {{
+    color: {Colors.GOLD};
+    font-size: 17px;
+    font-weight: 800;
+    letter-spacing: 1px;
+}}
+QLabel#sidebarSub {{
+    color: {Colors.TEXT_SECONDARY};
+    font-size: 10px;
+    letter-spacing: 1px;
+}}
+QLabel#liveBadge {{
+    background-color: rgba(78, 197, 241, 36);
+    color: {Colors.CYAN};
+    border: 1px solid {Colors.CYAN};
+    border-radius: 8px;
+    padding: 1px 7px;
+    font-size: 10px;
+    font-weight: 700;
+}}
+QFrame#previewPanel {{
+    background-color: #101725;
+    border: 1px solid {Colors.BORDER};
+    border-radius: 10px;
+}}
+QLabel#previewRange {{
+    color: {Colors.TEXT_SECONDARY};
+    font-size: 10px;
+}}
+QFrame#overviewCard {{
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 0, y2: 1,
+        stop: 0 {Colors.BG_CARD},
+        stop: 1 {Colors.BG_PANEL}
+    );
+    border: 1px solid {Colors.BORDER};
+    border-radius: 8px;
+}}
+QLabel#charAvatar {{
+    border-radius: 14px;
+    font-size: 12px;
+    font-weight: 800;
+    color: {Colors.BG_DEEPEST};
 }}
 
 /* ── 分组框 ───────────────────────────────────── */
 QGroupBox {{
     background-color: {Colors.BG_PANEL};
     border: 1px solid {Colors.BORDER};
-    border-radius: 8px;
+    border-radius: 10px;
     margin-top: 14px;
-    padding: 12px 10px 10px 10px;
-    font-weight: 600;
+    padding: 14px 10px 10px 10px;
+    font-weight: 700;
 }}
 QGroupBox::title {{
     subcontrol-origin: margin;
     subcontrol-position: top left;
-    left: 12px;
-    padding: 0 6px;
+    left: 14px;
+    padding: 0 8px;
     color: {Colors.GOLD};
+    background-color: {Colors.BG_DARK};
+    border-radius: 4px;
 }}
 
 /* ── Tab ──────────────────────────────────────── */
 QTabWidget::pane {{
     background-color: {Colors.BG_PANEL};
     border: 1px solid {Colors.BORDER};
-    border-radius: 0 6px 6px 6px;
+    border-radius: 10px;
     top: -1px;
 }}
 QTabBar::tab {{
-    background-color: {Colors.BG_DARK};
+    background-color: transparent;
     color: {Colors.TEXT_SECONDARY};
-    padding: 8px 18px;
-    margin-right: 2px;
-    border: 1px solid {Colors.BORDER};
-    border-bottom: none;
-    border-radius: 6px 6px 0 0;
-    font-weight: 500;
+    padding: 9px 20px;
+    margin-right: 4px;
+    border: 1px solid transparent;
+    border-bottom: 2px solid transparent;
+    border-radius: 8px 8px 0 0;
+    font-weight: 600;
 }}
 QTabBar::tab:hover {{
     background-color: {Colors.BG_HOVER};
@@ -330,7 +429,8 @@ QTabBar::tab:hover {{
 QTabBar::tab:selected {{
     background-color: {Colors.BG_PANEL};
     color: {Colors.GOLD};
-    border-color: {Colors.BG_PANEL};
+    border-color: {Colors.BORDER};
+    border-bottom: 2px solid {Colors.GOLD};
 }}
 
 /* ── 菜单 ─────────────────────────────────────── */
@@ -350,16 +450,27 @@ QMenuBar::item:selected {{
 }}
 QMenu {{
     background-color: {Colors.BG_CARD};
-    border: 1px solid {Colors.BORDER};
-    border-radius: 6px;
-    padding: 4px;
+    border: 1px solid {Colors.BORDER_FOCUS};
+    border-radius: 8px;
+    padding: 6px;
 }}
 QMenu::item {{
-    padding: 6px 24px;
-    border-radius: 4px;
+    padding: 6px 26px;
+    border-radius: 5px;
 }}
 QMenu::item:selected {{
     background-color: {Colors.BG_SELECTED};
+}}
+QMenu::indicator {{
+    width: 14px;
+    height: 14px;
+    border: 1px solid {Colors.TEXT_SECONDARY};
+    border-radius: 3px;
+    background-color: {Colors.BG_PANEL};
+}}
+QMenu::indicator:checked {{
+    background-color: {Colors.GOLD};
+    border-color: {Colors.GOLD};
 }}
 QMenu::separator {{
     height: 1px;
@@ -372,8 +483,8 @@ QToolTip {{
     background-color: {Colors.BG_CARD};
     color: {Colors.TEXT_PRIMARY};
     border: 1px solid {Colors.CYAN};
-    border-radius: 4px;
-    padding: 5px 8px;
+    border-radius: 6px;
+    padding: 6px 9px;
 }}
 
 /* ── 复选框 ───────────────────────────────────── */
@@ -385,8 +496,11 @@ QCheckBox::indicator {{
     width: 16px;
     height: 16px;
     border: 1px solid {Colors.BORDER};
-    border-radius: 3px;
+    border-radius: 4px;
     background-color: {Colors.BG_PANEL};
+}}
+QCheckBox::indicator:hover {{
+    border-color: {Colors.CYAN};
 }}
 QCheckBox::indicator:checked {{
     background-color: {Colors.GOLD};
@@ -397,13 +511,17 @@ QCheckBox::indicator:checked {{
 QProgressBar {{
     background-color: {Colors.BG_PANEL};
     border: 1px solid {Colors.BORDER};
-    border-radius: 4px;
+    border-radius: 5px;
     text-align: center;
     color: {Colors.TEXT_PRIMARY};
 }}
 QProgressBar::chunk {{
-    background-color: {Colors.GOLD};
-    border-radius: 3px;
+    background: qlineargradient(
+        x1: 0, y1: 0, x2: 1, y2: 0,
+        stop: 0 #C89A45,
+        stop: 1 {Colors.GOLD}
+    );
+    border-radius: 4px;
 }}
 """
 
