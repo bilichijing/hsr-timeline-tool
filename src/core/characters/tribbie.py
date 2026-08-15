@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING
 
 from ..buff import Buff, BuffDuration, StackRule
 from ..damage import DamageType
-from ..eidolon import get_rank_param
+from ..eidolon import get_rank_param, has_rank
 from ..skill import SkillEffect, SkillType, get_skill_by_type
 from . import register
 from .base import CharacterModule, module_params
@@ -119,6 +119,9 @@ class TribbieModule(CharacterModule):
     e2_extra_hits: int = 0              # E2：额外附加伤害次数
     e4_def_ignore: float = 0.0          # E4：神启期间我方全体无视防御
     e4_contribution: float = 0.0        # E4 对 enemy.def_reduce 的贡献
+    e1_true_ratio: float = 0.0          # E1：附加伤害目标额外承受攻击总伤害比例的真实伤害
+    e6_talent_trigger: bool = False     # E6：缇宝自身终结技后触发天赋追击
+    e6_talent_dmg_bonus: float = 0.0    # E6：天赋追击追加到普通增伤乘区的数值
 
     # ── 事件钩子 ─────────────────────────────────────────
 
@@ -137,7 +140,7 @@ class TribbieModule(CharacterModule):
 
         # 星魂参数
         self.eidolon_rank = max(0, min(6, int(getattr(char, "rank", 0))))
-        if self.eidolon_rank >= 2:
+        if self.eidolon_rank >= 2 and has_rank(char.ranks_raw, 2):
             self.e2_added_mult = get_rank_param(char.ranks_raw, 2, 0, 1.2)
             self.e2_extra_hits = int(get_rank_param(char.ranks_raw, 2, 1, 1))
         else:
@@ -145,9 +148,18 @@ class TribbieModule(CharacterModule):
             self.e2_extra_hits = 0
         self.e4_def_ignore = (
             get_rank_param(char.ranks_raw, 4, 0, 0.18)
-            if self.eidolon_rank >= 4 else 0.0
+            if self.eidolon_rank >= 4 and has_rank(char.ranks_raw, 4) else 0.0
         )
         self.e4_contribution = 0.0
+        self.e1_true_ratio = (
+            get_rank_param(char.ranks_raw, 1, 0, 0.24)
+            if self.eidolon_rank >= 1 and has_rank(char.ranks_raw, 1) else 0.0
+        )
+        self.e6_talent_trigger = self.eidolon_rank >= 6 and has_rank(char.ranks_raw, 6)
+        self.e6_talent_dmg_bonus = (
+            get_rank_param(char.ranks_raw, 6, 0, 7.29)
+            if self.e6_talent_trigger else 0.0
+        )
         # 【岔路旁的小石子】：战斗开始恢复 30 点能量（走能量恢复效率乘区）
         if self.a4_start_energy:
             sim.recover_energy(char, self.a4_start_energy)
@@ -261,6 +273,9 @@ class TribbieModule(CharacterModule):
             self._ultra_aoe(sim, char, skill, log)
             # 缇宝施放终结技：重置我方其他角色可触发次数
             self.ultra_ready = {}
+            # E6：缇宝施放终结技后，对敌方全体发动天赋追加攻击
+            if self.e6_talent_trigger:
+                self._ultra_follow_up(sim, char)
             return
         # 我方其他角色施放终结技后：缇宝发动天赋追加攻击（每角色最多 1 次）
         if self.ultra_ready.get(char.unit_id, True):
@@ -295,11 +310,23 @@ class TribbieModule(CharacterModule):
             if not targets:
                 continue
             highest = max(targets, key=lambda e: e.current_hp)
+            log = self._action_logs.get(token)
+            # 快照“本次攻击总伤害”，E1 真实伤害只基于原攻击（不含附加伤害自身）
+            action_damage = log.total_damage if log is not None else 0.0
             self._extra_damage(
                 sim, char, highest,
-                self._action_logs.get(token),
+                log,
                 self._action_stats.get(token),
             )
+            # E1：对附加伤害目标额外造成本次攻击总伤害 #1 的真实伤害
+            if (
+                self.e1_true_ratio > 0 and log is not None
+                and action_damage > 0 and not highest.is_dead
+            ):
+                sim.deal_true_damage(
+                    char, highest, action_damage * self.e1_true_ratio,
+                    skill_type=SkillType.ADDED, log=log,
+                )
         self._action_targets.clear()
         self._action_logs.clear()
         self._action_stats.clear()
@@ -546,6 +573,13 @@ class TribbieModule(CharacterModule):
         sim.begin_new_action()
         target = sim.enemies[0]
         log = sim.make_follow_up_log(char, target, notes="天赋追击")
+        # E6：天赋追加攻击伤害提高 729%，追加到普通增伤乘区。
+        # 用本次追击专用 stats 快照实现，不修改角色 buff，避免把
+        # 结界附加伤害等后续伤害也错误吃满该增伤。
+        e6_stats = None
+        if self.e6_talent_dmg_bonus > 0:
+            e6_stats = char.final_stats()
+            e6_stats.dmg_bonus += self.e6_talent_dmg_bonus
         # 对敌方全体造成伤害（单敌模型 = 1 段；多敌 TODO 全打）
         for enemy in sim.enemies:
             effect = SkillEffect(
@@ -555,7 +589,10 @@ class TribbieModule(CharacterModule):
                 toughness_damage=0,  # TODO: 追击削韧待勘探（show_stance_list 第二项 15）
                 element=ELEMENT,
             )
-            sim.deal_damage(char, enemy, effect, skill_type=SkillType.FOLLOW_UP, log=log)
+            sim.deal_damage(
+                char, enemy, effect,
+                skill_type=SkillType.FOLLOW_UP, log=log, stats=e6_stats,
+            )
         # 追加攻击回能（天赋 sp_base=5）
         sim.recover_energy(char, talent.energy_recover)
         log.energy_after = char.energy

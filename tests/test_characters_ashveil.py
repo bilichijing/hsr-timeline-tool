@@ -595,6 +595,7 @@ class TestEidolons:
             unit_id="e1", name="木桩",
             max_toughness=300, current_toughness=300,
             weakness_elements=["Thunder"], speed=50,
+            resistance={"Thunder": 0.2, "Fire": 0.0},
         )
         sim = BattleSimulator(characters=[char], enemies=[enemy])
         sim.setup()
@@ -617,3 +618,33 @@ class TestEidolons:
         })
         assert module.e4_atk_buff == 0.4
         assert module.e4_atk_turns == 3
+
+    def test_e1_vulnerability_low_hp(self):
+        """E1：敌人低血量时易伤从 24% 提高到 36%。"""
+        char, sim, module = self._with_rank(1, {
+            "1": {"id": 150401, "name": "一魂", "desc": "易伤", "param_list": [0.24, 0.5, 0.36]},
+        })
+        enemy = sim.enemies[0]
+        enemy.max_hp = 1000
+        enemy.current_hp = 900
+        module._sync_e1_vulnerability(sim)
+        assert enemy.vulnerability == pytest.approx(0.24)
+        enemy.current_hp = 500
+        module._sync_e1_vulnerability(sim)
+        assert enemy.vulnerability == pytest.approx(0.36)
+
+    def test_e6_res_reduce_and_greed_damage_stacking(self):
+        """E6：饲饵存在时全抗性降低；累计婪酣层数转为普通增伤。"""
+        char, sim, module = self._with_rank(6, {
+            "6": {"id": 150406, "name": "六魂", "desc": "抗性降低与增伤", "param_list": [0.2, 0.04, 30]},
+        })
+        enemy = sim.enemies[0]
+        # setup 时最低血量敌人已成为饲饵，E6 抗性降低应已生效
+        assert enemy.resistance["Thunder"] == pytest.approx(0.0)
+        assert enemy.resistance["Fire"] == pytest.approx(-0.2)
+        module.greed_gained_total = 5
+        module._update_e6_dmg_buff(char)
+        assert char.final_stats().dmg_bonus == pytest.approx(0.04 * 5)
+        module.greed_gained_total = 40
+        module._update_e6_dmg_buff(char)
+        assert char.final_stats().dmg_bonus == pytest.approx(0.04 * 30)  # 封顶 30 层

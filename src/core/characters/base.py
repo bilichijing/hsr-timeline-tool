@@ -134,6 +134,20 @@ class CharacterModule:
     ) -> None:
         """敌人死亡离场后：清理模块对它的引用（如饲饵、煞火缠身）。"""
 
+    def on_damage_taken(
+        self,
+        sim: BattleSimulator,
+        char: CharacterUnit,
+        amount: float,
+        source: Any,
+        context: Any = None,
+    ) -> None:
+        """我方角色受到伤害（敌方攻击等外部来源）。
+
+        当前为“我方受击模型”的最小实现：敌方攻击结算后触发，
+        供星魂等效果使用（如千冶 E6）。默认不处理。
+        """
+
     def enemy_buffs(
         self,
         sim: BattleSimulator,

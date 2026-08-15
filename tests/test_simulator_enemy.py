@@ -297,6 +297,28 @@ class TestEnemyAttack:
         sim.run()
         assert char.energy == pytest.approx(45.0)  # 30 × (1 + 0.5)
 
+    def test_deal_true_damage_bypasses_formula(self):
+        """真实伤害只按传入值扣血，并记录 DamageType.TRUE。"""
+        char = _make_char()
+        char.base_stats = BaseStats(
+            atk_base=1000, spd_base=100, energy_max=100, hp_base=5000,
+            def_base=500,
+        )
+        enemy = EnemyState(
+            unit_id="e1", name="木桩",
+            max_hp=100000, current_hp=100000,
+            max_toughness=100, current_toughness=0,
+            weakness_elements=["Thunder"], is_broken=True, level=80, speed=0.0,
+        )
+        sim = BattleSimulator(characters=[char], enemies=[enemy])
+        sim.setup()
+        log = sim.make_follow_up_log(char, enemy, notes="真实伤害测试")
+        amount = sim.deal_true_damage(char, enemy, 100.0, log=log)
+        assert amount == 100.0
+        assert enemy.current_hp == pytest.approx(100000 - 100)
+        assert log.damage_records[-1].damage_type == DamageType.TRUE
+        assert log.total_damage == pytest.approx(100.0)
+
     def test_enemy_attack_multi_target(self):
         """敌方攻击可多选角色：一次攻击命中多个目标。"""
         char1 = _make_char()

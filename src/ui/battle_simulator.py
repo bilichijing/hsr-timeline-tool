@@ -93,6 +93,15 @@ PATH_MAP_ZH_TO_EN: dict[str, str] = {v: k for k, v in PATH_MAP.items()}
 ELEMENT_MAP_ZH_TO_EN: dict[str, str] = {v: k for k, v in ELEMENT_MAP.items()}
 
 # 操作类型 → 中文
+DAMAGE_TYPE_NAMES_ZH: dict[str, str] = {
+    "normal": "常规",
+    "break": "击破",
+    "super_break": "超击破",
+    "dot": "持续",
+    "elation": "欢愉",
+    "true": "真实伤害",
+}
+
 ACTION_NAMES_ZH: dict[str, str] = {
     "normal": "普攻",
     "skill": "战技",
@@ -1012,9 +1021,9 @@ class BattleSimulatorWindow(QMainWindow):
         """伤害明细页：表格。"""
         page = QWidget()
         layout = QVBoxLayout(page)
-        self.detail_table = QTableWidget(0, 8)
+        self.detail_table = QTableWidget(0, 9)
         self.detail_table.setHorizontalHeaderLabels(
-            ["回合", "总AV", "行动者", "操作", "目标", "伤害段数", "总伤害", "备注"]
+            ["回合", "总AV", "行动者", "操作", "目标", "伤害段数", "伤害类型", "总伤害", "备注"]
         )
         self.detail_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.detail_table.verticalHeader().setDefaultSectionSize(32)
@@ -3133,8 +3142,13 @@ class BattleSimulatorWindow(QMainWindow):
             self.detail_table.setItem(i, 5, QTableWidgetItem(
                 f"{len(log.damages)} 段" if log.damages else "-"
             ))
-            self.detail_table.setItem(i, 6, QTableWidgetItem(f"{log.total_damage:.0f}"))
-            self.detail_table.setItem(i, 7, QTableWidgetItem(log.notes or "-"))
+            damage_types = [
+                DAMAGE_TYPE_NAMES_ZH.get(record.damage_type.value, record.damage_type.value)
+                for record in log.damage_records
+            ]
+            self.detail_table.setItem(i, 6, QTableWidgetItem("、".join(dict.fromkeys(damage_types)) or "-"))
+            self.detail_table.setItem(i, 7, QTableWidgetItem(f"{log.total_damage:.0f}"))
+            self.detail_table.setItem(i, 8, QTableWidgetItem(log.notes or "-"))
 
     def _fill_summary(self, result: BattleResult) -> None:
         """汇总页：卡片 + 角色状态 + 怪物状态。"""

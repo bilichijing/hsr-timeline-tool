@@ -74,6 +74,15 @@ class AshveilModule(CharacterModule):
     e2_return_rate: float = 0.0       # E2：强化追击后返还已移除婪酣的比例
     e4_atk_buff: float = 0.0          # E4：终结技后攻击力提高
     e4_atk_turns: int = 0
+    e1_vuln: float = 0.0             # E1：普通易伤
+    e1_low_vuln: float = 0.0         # E1：低血量易伤
+    e1_hp_ratio: float = 0.5         # E1：低血量阈值
+    _e1_vuln_contrib: dict[str, float] = {}
+    e6_res_reduce: float = 0.0       # E6：饲饵存在时敌方全抗性降低
+    _e6_res_original: dict[str, dict[str, float]] = {}
+    e6_dmg_per_greed: float = 0.0    # E6：每层婪酣增伤
+    e6_max_stacks: int = 30
+    greed_gained_total: int = 0      # E6：整场战斗累计获得过的婪酣层数
 
     # 已处理天赋的受击行动令牌集合（按行动计：一次攻击行动的多段命中
     # 只触发一次"固定回 8 能量 + 追击判定"，避免战技 5 段回 5 次）。
@@ -110,12 +119,35 @@ class AshveilModule(CharacterModule):
             int(get_rank_param(char.ranks_raw, 4, 1, 3))
             if self.eidolon_rank >= 4 else 0
         )
+        if self.eidolon_rank >= 1:
+            self.e1_vuln = get_rank_param(char.ranks_raw, 1, 0, 0.24)
+            self.e1_low_vuln = get_rank_param(char.ranks_raw, 1, 2, 0.36)
+            self.e1_hp_ratio = get_rank_param(char.ranks_raw, 1, 1, 0.50)
+        else:
+            self.e1_vuln = self.e1_low_vuln = 0.0
+            self.e1_hp_ratio = 0.50
+        if self.eidolon_rank >= 6:
+            self.e6_res_reduce = get_rank_param(char.ranks_raw, 6, 0, 0.20)
+            self.e6_dmg_per_greed = get_rank_param(char.ranks_raw, 6, 1, 0.04)
+            self.e6_max_stacks = int(get_rank_param(char.ranks_raw, 6, 2, 30))
+        else:
+            self.e6_res_reduce = 0.0
+            self.e6_dmg_per_greed = 0.0
+            self.e6_max_stacks = 30
+        self._e1_vuln_contrib = {}
+        self._e6_res_original = {}
+        self.greed_gained_total = 0
         # 战斗开始：当前场上生命值最低的敌方单体成为饲饵
         lowest = self._lowest_hp_enemy(sim)
         if lowest is not None:
             self._set_bait(sim, char, lowest)
         # 秘技进战效果：对敌方全体造成攻击力 #2 倍率雷伤，并获 #3 点充能
         self._technique_on_battle_start(sim, char)
+
+        # 星魂常驻敌方效果初始化
+        self._sync_e1_vulnerability(sim)
+        self._sync_e6_res(sim)
+        self._update_e6_dmg_buff(char)
 
     def on_skill_cast(
         self,
@@ -166,6 +198,7 @@ class AshveilModule(CharacterModule):
         char = next((c for c in sim.characters if c.unit_id == self.unit_id), None)
         if char is None:
             return
+        self._sync_e1_vulnerability(sim)
         self._talent_follow_up(sim, char)
 
     def on_skill_end(
@@ -211,6 +244,8 @@ class AshveilModule(CharacterModule):
         if self.e2_return_rate > 0 and removed > 0:
             refund = int(removed * self.e2_return_rate)
             self.greed = min(self.greed_cap, self.greed + refund)
+            self.greed_gained_total += refund
+            self._update_e6_dmg_buff(char)
         # TODO: 致命攻击转移未建模（需敌人 HP/死亡模型）：
         #   追击击杀饲饵后应转移到新饲饵继续打，直至婪酣 < #3 层。
 
@@ -227,6 +262,7 @@ class AshveilModule(CharacterModule):
             self._set_bait(sim, char, lowest)
         else:
             self._update_def_reduce(sim, char)
+            self._sync_e6_res(sim)
 
     def enemy_buffs(
         self,
@@ -244,6 +280,13 @@ class AshveilModule(CharacterModule):
         # 仅当前饲饵目标显示标记
         if enemy.unit_id == self.bait_unit_id:
             items.append(("饲饵", "当前为不死途的饲饵目标"))
+        # E1：不死途在场时，敌方全体受伤提高（低血量时提高更多）
+        if self.e1_vuln > 0:
+            rate = self._e1_vuln_for(enemy)
+            items.append(("小心，满月不可外出", f"受到伤害提高 {rate * 100:.1f}%"))
+        # E6：饲饵存在时，敌方全属性抗性降低
+        if self.bait_unit_id and self.e6_res_reduce > 0:
+            items.append(("结局，或许无人生还", f"全属性抗性降低 {self.e6_res_reduce * 100:.1f}%"))
         return items
 
     # ── 私有辅助 ─────────────────────────────────────────
@@ -314,6 +357,7 @@ class AshveilModule(CharacterModule):
         """置饲饵（仅最新目标生效）并更新减防。"""
         self.bait_unit_id = target.unit_id
         self._update_def_reduce(sim, char)
+        self._sync_e6_res(sim)
 
     def _update_def_reduce(self, sim: BattleSimulator, char: CharacterUnit) -> None:
         """场上存在饲饵 → 敌方全体减防 = 战技 #4；否则撤销本模块贡献。
@@ -356,10 +400,68 @@ class AshveilModule(CharacterModule):
                 notes="天赋追击", energy_recover=talent.energy_recover,
             )
         # 获得婪酣（钳制上限；E2 提高上限）
-        self.greed = min(
-            self.greed + int(module_params(talent, 5, 2)),
-            self.greed_cap,
-        )
+        greed_before = self.greed
+        greed_gain = int(module_params(talent, 5, 2))
+        self.greed = min(greed_before + greed_gain, self.greed_cap)
+        self.greed_gained_total += self.greed - greed_before
+        self._update_e6_dmg_buff(char)
+
+    def _e1_vuln_for(self, enemy: EnemyState) -> float:
+        """E1：目标当前生命值百分比 ≤ 阈值时使用更高易伤。"""
+        if enemy.max_hp > 0 and enemy.current_hp / enemy.max_hp <= self.e1_hp_ratio:
+            return self.e1_low_vuln
+        return self.e1_vuln
+
+    def _sync_e1_vulnerability(self, sim: BattleSimulator) -> None:
+        """E1：不死途在场时，敌方全体受到伤害提高（增量式，与其他易伤共存）。"""
+        if self.e1_vuln <= 0:
+            if not self._e1_vuln_contrib:
+                return
+            for enemy in sim.enemies:
+                old = self._e1_vuln_contrib.get(enemy.unit_id, 0.0)
+                enemy.vulnerability -= old
+            self._e1_vuln_contrib = {}
+            return
+        for enemy in sim.enemies:
+            old = self._e1_vuln_contrib.get(enemy.unit_id, 0.0)
+            rate = self._e1_vuln_for(enemy)
+            enemy.vulnerability += rate - old
+            self._e1_vuln_contrib[enemy.unit_id] = rate
+
+    def _sync_e6_res(self, sim: BattleSimulator) -> None:
+        """E6：场上存在饲饵时降低敌方全体全属性抗性；无饲饵时恢复。"""
+        active = bool(self.bait_unit_id) and self.e6_res_reduce > 0
+        if active and not self._e6_res_original:
+            for enemy in sim.enemies:
+                self._e6_res_original[enemy.unit_id] = dict(enemy.resistance)
+                enemy.resistance = {
+                    element: value - self.e6_res_reduce
+                    for element, value in enemy.resistance.items()
+                }
+        elif not active and self._e6_res_original:
+            for enemy in sim.enemies:
+                original = self._e6_res_original.get(enemy.unit_id)
+                if original is not None:
+                    enemy.resistance = dict(original)
+            self._e6_res_original = {}
+
+    def _update_e6_dmg_buff(self, char: CharacterUnit) -> None:
+        """E6：整场累计获得过的婪酣层数 → 常驻普通增伤 buff（最多 30 层）。"""
+        buff_id = "ashveil_e6_greed_dmg"
+        char.buff_mgr.remove(buff_id)
+        if self.e6_dmg_per_greed <= 0 or self.greed_gained_total <= 0:
+            return
+        stacks = min(self.greed_gained_total, self.e6_max_stacks)
+        char.buff_mgr.add(Buff(
+            id=buff_id,
+            name="结局，或许无人生还",
+            stat="dmg_bonus",
+            value=self.e6_dmg_per_greed * stacks,
+            duration_type=BuffDuration.PERMANENT,
+            duration_count=-1,
+            source_unit=char.unit_id,
+            stack_rule=StackRule.NO_STACK_SAME_NAME,
+        ))
 
     def _apply_e4_atk_buff(self, sim: BattleSimulator, char: CharacterUnit) -> None:
         """E4：施放终结技时攻击力提高 #1，持续 #2 回合。"""

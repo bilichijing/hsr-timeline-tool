@@ -362,3 +362,28 @@ class TestCalculateDamageDispatch:
         ctx = make_ctx(damage_type="unknown")  # type: ignore
         with pytest.raises(ValueError):
             calculate_damage(ctx)
+
+
+class TestTrueDamage:
+    def test_true_damage_ignores_defense_resistance_and_bonuses(self):
+        ctx = make_ctx(
+            damage_type=DamageType.TRUE,
+            base_value=1000,
+            is_weakness=False,
+            is_broken=False,
+            resistance=0.9,
+            vulnerability=2.0,
+            dmg_bonus=3.0,
+            is_crit=True,
+            crit_dmg=2.0,
+            defense_ctx=DefenseContext(attacker_level=80, defender_level=95),
+        )
+        assert calculate_damage(ctx) == pytest.approx(1000)
+
+    def test_true_damage_dispatch(self):
+        ctx = make_ctx(damage_type=DamageType.TRUE, base_value=123.0)
+        assert calculate_damage(ctx) == pytest.approx(123.0)
+
+    def test_true_damage_non_negative(self):
+        ctx = make_ctx(damage_type=DamageType.TRUE, base_value=-5)
+        assert calculate_damage(ctx) == 0.0

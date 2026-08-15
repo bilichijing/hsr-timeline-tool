@@ -66,6 +66,7 @@ class DamageType(Enum):
     SUPER_BREAK = "super_break"  # 超击破伤害
     DOT = "dot"                 # 持续伤害
     ELATION = "elation"         # 欢愉伤害
+    TRUE = "true"               # 真实伤害（无视防御/抗性/增伤/暴击）
 
 
 @dataclass
@@ -382,4 +383,7 @@ def calculate_damage(ctx: DamageContext) -> float:
         return calc_dot_damage(ctx)
     if ctx.damage_type == DamageType.ELATION:
         return calc_elation_damage(ctx)
+    if ctx.damage_type == DamageType.TRUE:
+        # 真实伤害：只取基础值，不吃防御/抗性/增伤/暴击
+        return max(0.0, ctx.base_value)
     raise ValueError(f"未知伤害类型: {ctx.damage_type}")

@@ -101,6 +101,8 @@ class MortenaxModule(CharacterModule):
     e1_res_reduce: float = 0.0         # E1：结界期间敌方全体全属性抗性降低
     e6_enhanced_mult: float = 1.0      # E6：强化终结技倍率系数
     _e1_res_original: dict[str, dict[str, float]] = {}  # E1 抗性原始值（退出结界恢复）
+    # E6：受到伤害/消耗生命充能去重键（每个外部攻击来源或行动只计 1 次）
+    _e6_charge_tokens: set[str] = set()
 
     # ── 事件钩子 ─────────────────────────────────────────
 
@@ -111,6 +113,7 @@ class MortenaxModule(CharacterModule):
         self.countdown_unit_id = ""
         self.blaze = {}
         self._charged_tokens = set()
+        self._e6_charge_tokens = set()
         # 【百炼骨】额外能力：战斗开始时若能量不足 75% 则立刻恢复至 75%
         self._read_trace_params(char)
         self._regen_energy_to_ratio(sim, char)
@@ -177,6 +180,7 @@ class MortenaxModule(CharacterModule):
             # （清空 effects，避免 _resolve_skill 单目标误结算主伤害）
             skill.effects = []
             self._consume_hp(char, module_params(skill, 4, 0.1))
+            self._e6_charge_from_hp_loss(sim, char)
         elif skill_id == SKILL_ULTRA_ENH:
             # 强化终结技：全体生命上限伤害（多敌人），延迟到 on_skill_end 结算
             skill.effects = []
@@ -213,10 +217,7 @@ class MortenaxModule(CharacterModule):
         if action_token in self._charged_tokens:
             return
         self._charged_tokens.add(action_token)
-        # 充能 +1（封顶需求值；无法施放战技时保留）
-        need = self._talent_charge_need(char)
-        self.charge = min(self.charge + 1, need)
-        self._talent_proc(sim, char)
+        self._gain_charge(sim, char)
 
     def on_skill_end(
         self,
@@ -263,6 +264,30 @@ class MortenaxModule(CharacterModule):
     def on_enemy_dead(self, sim: BattleSimulator, enemy: EnemyState) -> None:
         """煞火缠身目标死亡：移除其状态记录（敌对象已离场，无需撤销贡献）。"""
         self.blaze.pop(enemy.unit_id, None)
+
+    def on_damage_taken(
+        self,
+        sim: BattleSimulator,
+        char: CharacterUnit,
+        amount: float,
+        source: Any,
+        context: Any = None,
+    ) -> None:
+        """E6：我方受击模型——受到伤害时获得 1 点充能。
+
+        每个敌方攻击来源只触发一次；“任意目标回合结束后可再次触发”
+        在当前配置式敌方攻击模型中由来源唯一性近似（同一攻击条目不会重复）。
+        """
+        if self.eidolon_rank < 6 or amount <= 0 or char.unit_id != self.unit_id:
+            return
+        # 以单次敌方攻击行动为单位去重（context 是攻击调度条目）。
+        # “任意目标回合结束后可再次触发”在当前模型中近似为：
+        # 每次配置的敌方攻击行动都可触发一次。
+        key = f"hit:{getattr(context, 'unit_id', getattr(source, 'unit_id', id(source)))}"
+        if key in self._e6_charge_tokens:
+            return
+        self._e6_charge_tokens.add(key)
+        self._gain_charge(sim, char)
 
     def enemy_buffs(
         self,
@@ -316,6 +341,21 @@ class MortenaxModule(CharacterModule):
         if char.energy < target:
             char.energy = target
 
+    def _gain_charge(self, sim: BattleSimulator, char: CharacterUnit) -> None:
+        """充能 +1（封顶需求值）并尝试触发天赋。"""
+        self.charge = min(self.charge + 1, self._talent_charge_need(char))
+        self._talent_proc(sim, char)
+
+    def _e6_charge_from_hp_loss(self, sim: BattleSimulator, char: CharacterUnit) -> None:
+        """E6：消耗生命值时获得 1 点充能（按行动 token 去重）。"""
+        if self.eidolon_rank < 6:
+            return
+        key = f"hp:{sim.action_token}"
+        if key in self._e6_charge_tokens:
+            return
+        self._e6_charge_tokens.add(key)
+        self._gain_charge(sim, char)
+
     def _talent_charge_need(self, char: CharacterUnit) -> int:
         """天赋充能触发阈值（E2 上限降低时同步降低）。"""
         talent = get_skill_by_type(char.skills, SkillType.TALENT)
@@ -352,6 +392,7 @@ class MortenaxModule(CharacterModule):
             self._apply_blaze(sim, char, enemy)
         # 消耗生命（不足降至 1）
         self._consume_hp(char, module_params(skill, 1, 0.2))
+        self._e6_charge_from_hp_loss(sim, char)
 
         # 无量忿怒：暴击率 #2、暴伤 #3
         self.rage = True
@@ -540,6 +581,7 @@ class MortenaxModule(CharacterModule):
         sim.begin_new_action()
         # 消耗生命（战技 #4，不足降至 1）
         self._consume_hp(char, module_params(skill, 4, 0.1))
+        self._e6_charge_from_hp_loss(sim, char)
 
         log = sim.make_follow_up_log(char, sim.enemies[0], notes="因果尽偿·追加战技")
         # 本次独立行动的所有命中共享同一令牌

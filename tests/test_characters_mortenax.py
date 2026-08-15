@@ -787,3 +787,29 @@ class TestEidolons:
             "1": {"id": 150701, "name": "一魂", "desc": "抗性降低", "param_list": [0.2, 0.15]},
         })
         assert module.e1_res_reduce == 0.2
+
+    def test_e6_damage_taken_gains_charge(self):
+        """E6：受到伤害时获得 1 点充能，同一攻击来源只触发一次。"""
+        from types import SimpleNamespace
+
+        char, sim, module = self._with_rank(6, {
+            "6": {"id": 150706, "name": "六魂", "desc": "受伤充能", "param_list": [1.5]},
+        })
+        module.rage = True
+        source = SimpleNamespace(unit_id="enemy_hit_1")
+        module.on_damage_taken(sim, char, 100, source)
+        assert module.charge == 1
+        module.on_damage_taken(sim, char, 100, source)
+        assert module.charge == 1  # 同一次攻击不重复充能
+
+    def test_e6_hp_loss_gains_charge(self):
+        """E6：消耗生命值时获得 1 点充能，同一行动只触发一次。"""
+        char, sim, module = self._with_rank(6, {
+            "6": {"id": 150706, "name": "六魂", "desc": "耗血充能", "param_list": [1.5]},
+        })
+        module.rage = True
+        sim.action_token = 7
+        module._e6_charge_from_hp_loss(sim, char)
+        assert module.charge == 1
+        module._e6_charge_from_hp_loss(sim, char)
+        assert module.charge == 1  # 同一行动去重

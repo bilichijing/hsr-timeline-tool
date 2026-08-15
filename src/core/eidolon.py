@@ -103,6 +103,11 @@ def rank_skill_level_bonuses(raw: dict | None, rank: int) -> dict[SkillType, int
     return result
 
 
+def has_rank(raw: dict | None, rank: int) -> bool:
+    """判断原始 ranks 中是否存在指定星魂条目。"""
+    return isinstance(raw, dict) and str(rank) in raw
+
+
 def get_rank_param(
     raw: dict | None,
     rank: int,

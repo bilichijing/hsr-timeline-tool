@@ -1182,6 +1182,36 @@ class BattleSimulator:
 
         return damage
 
+    def deal_true_damage(
+        self,
+        attacker: CharacterUnit,
+        target: EnemyState,
+        amount: float,
+        *,
+        skill_type: SkillType = SkillType.ADDED,
+        log: ActionLog | None = None,
+    ) -> float:
+        """真实伤害：无视防御/抗性/增伤/暴击，只按传入值扣血。
+
+        不触发攻击命中钩子（真实伤害不是“攻击”），不削韧、不击破。
+        """
+        damage = max(0.0, amount)
+        if log is not None:
+            log.damages.append(damage)
+            log.total_damage += damage
+            log.damage_records.append(
+                DamageRecord(
+                    value=damage,
+                    skill_type=skill_type,
+                    damage_type=DamageType.TRUE,
+                    element=attacker.element,
+                    target_id=target.unit_id,
+                )
+            )
+        self.total_damage += damage
+        self._apply_enemy_hp_damage(target, damage)
+        return damage
+
     def make_follow_up_log(
         self,
         actor: CharacterUnit,
@@ -1330,6 +1360,12 @@ class BattleSimulator:
                     )
                 )
                 self.total_damage += damage
+                # 我方受击钩子（供千冶 E6 等星魂效果使用）
+                for module in self.char_modules.values():
+                    self._dispatch_hook(
+                        module, "on_damage_taken",
+                        self, char, damage, source or entry, entry,
+                    )
             # 恢复能量：走 recover_energy，普通回能享受能量恢复效率加成
             if atk.energy_recover:
                 self.recover_energy(char, atk.energy_recover)

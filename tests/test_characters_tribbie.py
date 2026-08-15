@@ -647,3 +647,40 @@ class TestEidolons:
             "4": {"id": 140304, "name": "四魂", "desc": "无视防御", "param_list": [0.18]},
         })
         assert module.e4_def_ignore == 0.18
+
+    def test_e1_true_damage_on_field_added_damage(self):
+        """E1：攻击后对附加伤害目标造成该次攻击总伤害 24% 的真实伤害。"""
+        from src.core.damage import DamageType
+
+        char = _make_tribbie()
+        char.rank = 1
+        char.ranks_raw = {
+            "1": {"id": 140301, "name": "一魂", "desc": "真实伤害", "param_list": [0.24]},
+        }
+        sim = _make_sim(char)
+        _ultra(sim, "tribbie")
+        _act(sim, "tribbie", SkillType.NORMAL)
+        last = sim.logs[-1]
+        true_records = [r for r in last.damage_records if r.damage_type == DamageType.TRUE]
+        assert len(true_records) == 1
+        # 真实伤害不经过防御/抗性/增伤乘区：24% × 原普攻伤害（普攻倍率 0.15）
+        normal_hp = 10000 + (10000 * A2_RATIO)
+        normal_damage = _dmg(normal_hp, NORMAL_MULT, 1 + FIELD_VULN)
+        assert true_records[0].value == pytest.approx(normal_damage * 0.24)
+
+    def test_e6_ultra_triggers_talent_follow_up_with_dmg_bonus(self):
+        """E6：缇宝自身终结技后触发天赋追击，且伤害吃 729% 普通增伤。"""
+        char = _make_tribbie()
+        char.rank = 6
+        char.ranks_raw = {
+            "6": {"id": 140306, "name": "六魂", "desc": "追击增伤", "param_list": [7.29]},
+        }
+        sim = _make_sim(char)
+        _ultra(sim, "tribbie")
+        follow_ups = [log for log in sim.logs if log.notes == "天赋追击"]
+        assert len(follow_ups) == 1
+        hp = 10000 + (10000 * A2_RATIO)
+        talent_damage = _dmg(hp, TALENT_MULT, 1 + FIELD_VULN, 1 + 7.29)
+        # 天赋追击会触发 1 段结界附加伤害（不吃 E6 增伤）
+        added_damage = _dmg(hp, EXTRA_MULT, 1 + FIELD_VULN)
+        assert follow_ups[0].total_damage == pytest.approx(talent_damage + added_damage)
