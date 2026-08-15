@@ -311,8 +311,10 @@ class BattleSimulator:
 
     def setup(self) -> None:
         """战斗初始化。"""
-        # 重置随机数发生器（固定种子，保证多敌人随机目标可复现）
+        # 重置随机数发生器（固定种子，保证多敌人随机目标可复现）。
+        # 暴击判定使用独立随机流：固定种子下同样可复现，且不会改变随机目标序列。
         self._rng = random.Random(self.rng_seed)
+        self._crit_rng = random.Random(self.rng_seed + 0x9E3779B9)
 
         # SP
         self.sp = SkillPoint(initial=self.initial_sp)
@@ -686,6 +688,7 @@ class BattleSimulator:
             "countdown_units": dict(self.countdown_units),
             "action_token": self.action_token,
             "rng_state": self._rng.getstate() if hasattr(self, "_rng") else None,
+            "crit_rng_state": self._crit_rng.getstate() if hasattr(self, "_crit_rng") else None,
         }
 
     def restore(self, snap: dict) -> None:
@@ -711,6 +714,10 @@ class BattleSimulator:
         rng_state = snap.get("rng_state")
         if rng_state is not None:
             self._rng.setstate(rng_state)
+        self._crit_rng = random.Random(self.rng_seed + 0x9E3779B9)
+        crit_state = snap.get("crit_rng_state")
+        if crit_state is not None:
+            self._crit_rng.setstate(crit_state)
 
     def _get_character(self, unit_id: str) -> CharacterUnit | None:
         for c in self.characters:
@@ -1059,6 +1066,18 @@ class BattleSimulator:
 
         return log
 
+    def _roll_crit(self, stats: FinalStats, damage_type: DamageType) -> bool:
+        """显式暴击判定（固定种子随机流，可复现）。
+
+        常规/欢愉伤害可暴击；击破/超击破/持续/真实伤害不暴击。
+        """
+        if damage_type not in (DamageType.NORMAL, DamageType.ELATION):
+            return False
+        rate = max(0.0, min(1.0, stats.crit_rate))
+        if rate <= 0:
+            return False
+        return self._crit_rng.random() < rate
+
     def _calc_skill_damage(
         self,
         char: CharacterUnit,
@@ -1114,7 +1133,7 @@ class BattleSimulator:
             vulnerability=target.vulnerability,
             damage_reductions=damage_reductions,
             defense_ctx=def_ctx,
-            is_crit=False,  # 暴击由调用方决定
+            is_crit=self._roll_crit(stats, effect.damage_type),  # 固定种子显式暴击判定
             crit_rate=stats.crit_rate,
             # 目标“受到暴击伤害提高”已接到 crit_dmg 字段（当前 is_crit=False，供未来暴击结算）
             crit_dmg=stats.crit_dmg

@@ -92,6 +92,9 @@ def _make_mortenax(unit_id: str = "mortenax") -> CharacterUnit:
         char_id="1507",
     )
     char.base_stats = BaseStats(hp_base=10000, spd_base=100, energy_max=160)
+    # 旧测试按“不暴击”断言伤害；千冶结界自带 +20% 暴击率。
+    # 这里把基础暴击设为 -20%，显式暴击判定时最终暴击率为 0，保持原期望。
+    char.base_stats.crit_rate = -0.2
     char.bonus_stats = StatBonus()
     char.skills = parse_all_skills(_mortenax_skills_raw(), level=1, ultra_energy_cost=160)
     return char
