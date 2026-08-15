@@ -114,7 +114,7 @@ PREVIEW_AV_WINDOW = 300.0
 
 # ── 队伍表格行数据与列号 ──────────────────────────────────
 
-# 队伍表格列号（名称/光锥 + 12 项属性；命途/属性仅在侧栏队伍概览显示）
+# 队伍表格列号（名称/光锥 + 12 项属性；命途/属性存于行数据供角色构建使用）
 COL_NAME = 0
 COL_LIGHTCONE = 1
 COL_HP, COL_ATK, COL_DEF, COL_SPD = 2, 3, 4, 5
@@ -512,7 +512,7 @@ class BattleSimulatorWindow(QMainWindow):
         root.addWidget(self._build_main_area(), stretch=1)
 
     def _build_sidebar(self) -> QWidget:
-        """左侧栏：品牌头图 + 队伍概览 + 未来行动预览 + 操作按钮。"""
+        """左侧栏：品牌头图 + 未来行动预览 + 操作按钮。"""
         sidebar = QWidget()
         sidebar.setObjectName("sidebar")
         sidebar.setFixedWidth(300)
