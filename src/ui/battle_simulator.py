@@ -120,7 +120,8 @@ COL_LIGHTCONE = 1
 COL_HP, COL_ATK, COL_DEF, COL_SPD = 2, 3, 4, 5
 COL_CRIT_RATE, COL_CRIT_DMG, COL_BREAK_EFFECT, COL_EFFECT_RES = 6, 7, 8, 9
 COL_ENERGY_REGEN, COL_EFFECT_HIT, COL_OUTGOING_HEAL, COL_DMG_BONUS = 10, 11, 12, 13
-COL_COUNT = 14
+COL_RANK = 14
+COL_COUNT = 15
 
 # 百分比列（数值为小数，0.05 = 5%）
 PERCENT_COLUMNS = {
@@ -133,6 +134,7 @@ TABLE_HEADERS = [
     "生命值", "攻击力", "防御力", "速度",
     "暴击率", "暴击伤害", "击破特攻", "效果抵抗",
     "能量恢复效率", "效果命中", "治疗量加成", "属性增伤",
+    "星魂",
 ]
 
 
@@ -254,6 +256,7 @@ class _RowCharData:
     lightcone_raw: list = field(default_factory=list)  # freesr 原始光锥列表
     lightcone_stats80: dict = field(default_factory=dict)  # 光锥 80 级基础（面板基础值显示用）
     lightcone_name: str = ""    # 携带光锥名（freesr 导入后填写）
+    ranks_raw: dict = field(default_factory=dict)  # nanoka ranks 原始数据（星魂描述/参数）
 
 
 # ── 角色详情后台加载线程 ──────────────────────────────────
@@ -297,6 +300,7 @@ class _CharacterDetailWorker(QObject):
             "stats80": stats80,
             "skills_raw": info.skills,
             "skill_trees_raw": info.skill_trees,
+            "ranks_raw": info.ranks,
         }
 
 
@@ -574,9 +578,9 @@ class BattleSimulatorWindow(QMainWindow):
         self.action_preview_table.verticalHeader().setVisible(False)
         self.action_preview_table.verticalHeader().setDefaultSectionSize(25)
         self.action_preview_table.horizontalHeader().setSectionResizeMode(QHeaderView.Fixed)
-        self.action_preview_table.setColumnWidth(0, 136)
-        self.action_preview_table.setColumnWidth(1, 52)
-        self.action_preview_table.setColumnWidth(2, 54)
+        self.action_preview_table.setColumnWidth(0, 110)
+        self.action_preview_table.setColumnWidth(1, 66)
+        self.action_preview_table.setColumnWidth(2, 66)
         self.action_preview_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.action_preview_table.setToolTip(
             "基于当前行动队列的静态预测；角色技能造成的推拉条/速度变化以实际结算为准"
@@ -667,9 +671,12 @@ class BattleSimulatorWindow(QMainWindow):
                 tip += "（小数，0.05 = 5%）"
             if col == COL_DMG_BONUS:
                 tip += "（仅该角色自身属性）"
+            if col == COL_RANK:
+                tip = "星魂等级 0~6（0=未激活）。鼠标悬停可查看当前星魂描述"
             item = QTableWidgetItem(TABLE_HEADERS[col])
             item.setToolTip(tip)
             self.team_table.setHorizontalHeaderItem(col, item)
+        header.resizeSection(COL_RANK, 72)
         self.team_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.team_table.verticalHeader().setDefaultSectionSize(30)
         self.team_table.setAlternatingRowColors(True)
@@ -1114,6 +1121,7 @@ class BattleSimulatorWindow(QMainWindow):
                 _RowCharData(char_id=c.id, name=c.name_zh or c.name_en, path=c.path, element=c.element),
             )
             self.team_table.setItem(row, 0, name_item)
+            self._set_rank_cell(row, 0)
             self._update_element_bonus_tooltips()
             # 异步加载真实详情（技能/面板自动填充）
             self._start_detail_load(row, c.id)
@@ -1163,8 +1171,11 @@ class BattleSimulatorWindow(QMainWindow):
         row_data.stats80 = payload.get("stats80", {})
         row_data.skills_raw = payload.get("skills_raw", {})
         row_data.skill_trees_raw = payload.get("skill_trees_raw", {})
+        row_data.ranks_raw = payload.get("ranks_raw", {}) or {}
         row_data.loaded = True
         name_item.setData(Qt.UserRole, row_data)
+        # 星魂等级保持原值（freesr 可能先于详情导入），仅刷新描述 tooltip
+        self._set_rank_cell(row, row_data.rank)
 
         # 自动填充面板列（角色基础 + 行迹加成 = 游戏面板最终值；
         # 行迹是常驻加成而非 buff，用户可手动修改表格模拟遗器加成）
@@ -1210,6 +1221,65 @@ class BattleSimulatorWindow(QMainWindow):
         else:
             text = str(value)
         self.team_table.setItem(row, col, QTableWidgetItem(text))
+
+    def _rank_spin_for_row(self, row: int) -> QSpinBox:
+        """返回队伍表格指定行的星魂 QSpinBox（不存在则创建）。"""
+        widget = self.team_table.cellWidget(row, COL_RANK)
+        if isinstance(widget, QSpinBox):
+            return widget
+        spin = QSpinBox(self.team_table)
+        spin.setRange(0, 6)
+        spin.setValue(0)
+        spin.setSuffix(" 魂")
+        spin.setToolTip("0魂：未激活星魂")
+        spin.valueChanged.connect(lambda value, r=row: self._on_rank_changed(r, value))
+        self.team_table.setCellWidget(row, COL_RANK, spin)
+        return spin
+
+    def _set_rank_cell(self, row: int, value: int) -> None:
+        """写入星魂等级（0~6）并同步到行数据。"""
+        spin = self._rank_spin_for_row(row)
+        value = max(0, min(6, int(value)))
+        spin.blockSignals(True)
+        spin.setValue(value)
+        spin.blockSignals(False)
+        self._sync_row_rank(row, value)
+        self._update_rank_tooltip(row)
+
+    def _on_rank_changed(self, row: int, value: int) -> None:
+        """队伍配置栏星魂 SpinBox 变化：更新行数据与描述 tooltip。"""
+        self._sync_row_rank(row, value)
+        self._update_rank_tooltip(row)
+
+    def _sync_row_rank(self, row: int, value: int) -> None:
+        name_item = self.team_table.item(row, 0)
+        if name_item is None:
+            return
+        row_data = name_item.data(Qt.UserRole)
+        if isinstance(row_data, _RowCharData):
+            row_data.rank = max(0, min(6, int(value)))
+            name_item.setData(Qt.UserRole, row_data)
+
+    def _update_rank_tooltip(self, row: int) -> None:
+        """根据当前星魂等级与 nanoka ranks 数据刷新 SpinBox tooltip。"""
+        spin = self._rank_spin_for_row(row)
+        name_item = self.team_table.item(row, 0)
+        if name_item is None:
+            return
+        row_data = name_item.data(Qt.UserRole)
+        if not isinstance(row_data, _RowCharData):
+            return
+        rank = spin.value()
+        if rank <= 0:
+            spin.setToolTip("0魂：未激活星魂")
+            return
+        raw_rank = row_data.ranks_raw.get(str(rank))
+        if not isinstance(raw_rank, dict):
+            spin.setToolTip(f"{rank}魂：暂无描述（角色详情未加载）")
+            return
+        name = raw_rank.get("name", "")
+        desc = clean_text(raw_rank.get("desc"), raw_rank.get("param_list") or [])
+        spin.setToolTip(f"{rank}魂 · {name}\n{desc}".strip())
 
     def _set_lightcone_cell(self, row: int, name: str) -> None:
         """写入光锥列（携带光锥名）。"""
@@ -1312,7 +1382,8 @@ class BattleSimulatorWindow(QMainWindow):
             name_item = self.team_table.item(row, 0)
             row_data = name_item.data(Qt.UserRole)
             row_data.sp_value = avatar.sp_value
-            row_data.rank = avatar.rank
+            row_data.rank = max(0, min(6, int(avatar.rank)))
+            self._set_rank_cell(row, row_data.rank)
             row_data.relics_raw = [
                 r.raw for r in profile.relics.get(char_id, [])
             ]
@@ -1436,6 +1507,7 @@ class BattleSimulatorWindow(QMainWindow):
                 element=ELEMENT_MAP_ZH_TO_EN.get(elem, ""),
             ))
             self.team_table.setItem(row, 0, name_item)
+            self._set_rank_cell(row, 0)
             self._set_cell_value(row, COL_HP, hp)
             self._set_cell_value(row, COL_ATK, atk)
             self._set_cell_value(row, COL_DEF, def_)
@@ -1461,12 +1533,16 @@ class BattleSimulatorWindow(QMainWindow):
             entry["row_data"] = asdict(row_data) if isinstance(row_data, _RowCharData) else None
             entry["cells"] = {}
             for col in range(1, COL_COUNT):
+                if col == COL_RANK:
+                    continue  # 星魂列是 cellWidget，单独存 rank 字段
                 item = self.team_table.item(row, col)
                 entry["cells"][col] = item.text() if item else ""
+            rank_spin = self.team_table.cellWidget(row, COL_RANK)
+            entry["rank"] = rank_spin.value() if isinstance(rank_spin, QSpinBox) else 0
             rows.append(entry)
 
         data = {
-            "version": 3,
+            "version": 4,
             "rows": rows,
             "enemy": {
                 "count": self.enemy_count_spin.value(),
@@ -1523,7 +1599,7 @@ class BattleSimulatorWindow(QMainWindow):
                 return default
 
         # ── 队伍表格 ──────────────────────────────
-        if data.get("version") in (2, 3) and isinstance(data.get("rows"), list):
+        if data.get("version") in (2, 3, 4) and isinstance(data.get("rows"), list):
             rows = data["rows"]
         else:
             # 旧格式（13 列）：属性列号整体 +1（插入光锥列）
@@ -1545,6 +1621,9 @@ class BattleSimulatorWindow(QMainWindow):
             self.team_table.setItem(i, 0, name_item)
             for col, text in entry.get("cells", {}).items():
                 self.team_table.setItem(i, int(col), QTableWidgetItem(str(text)))
+            # 星魂等级：优先条目级 rank 字段，其次行数据（兼容旧缓存）
+            rank_value = _int(entry.get("rank"), _int(rd.rank, 0))
+            self._set_rank_cell(i, rank_value)
         self._update_element_bonus_tooltips()
 
         # ── 怪物配置 ──────────────────────────────
@@ -1736,6 +1815,10 @@ class BattleSimulatorWindow(QMainWindow):
             else:
                 path, elem = "Knight", "Fire"  # 兜底：存护/火
 
+            rank_spin = self.team_table.cellWidget(row, COL_RANK)
+            rank = rank_spin.value() if isinstance(rank_spin, QSpinBox) else 0
+            ranks_raw = row_data.ranks_raw if isinstance(row_data, _RowCharData) else {}
+
             if isinstance(row_data, _RowCharData) and row_data.loaded and row_data.skills_raw:
                 # 真实角色：真实技能 + 真实面板（表格数值已自动填充，用户可改的为面板）
                 char = build_character_unit(
@@ -1753,6 +1836,8 @@ class BattleSimulatorWindow(QMainWindow):
                     initial_energy=row_data.sp_value,
                     # 行迹加成已包含在表格面板值中（作为 base_stats），不再重复叠加
                     skill_trees_raw=None,
+                    rank=rank,
+                    ranks_raw=ranks_raw,
                 )
                 # 用户手动编辑的面板数值覆盖真实基础值（模拟遗器加成）
                 char.base_stats.hp_base = cell_float(row, COL_HP, char.base_stats.hp_base)
@@ -1788,6 +1873,8 @@ class BattleSimulatorWindow(QMainWindow):
             if isinstance(row_data, _RowCharData) and row_data.char_id:
                 char.char_id = row_data.char_id
                 warnings.append(f"{name}：真实数据未就绪，使用预设技能")
+            char.rank = rank
+            char.ranks_raw = ranks_raw
             characters.append(char)
 
         enemy_name = "木桩"
@@ -2501,8 +2588,9 @@ class BattleSimulatorWindow(QMainWindow):
             charge = getattr(module, "charge", None)
             if charge is not None:
                 style = getattr(module, "CHARGE_STYLE", "dots")
-                # 充能上限：模块显式声明（不死途 3、千冶 9），缺失时按样式兜底
-                charge_max = int(getattr(
+                # 充能上限：实例值优先（星魂可能改上限，如千冶 E2），
+                # 否则用模块显式声明，缺失时按样式兜底
+                charge_max = int(getattr(module, "charge_limit", None) or getattr(
                     module, "CHARGE_MAX", 3 if style == "dots" else 9
                 ))
                 if style == "text":

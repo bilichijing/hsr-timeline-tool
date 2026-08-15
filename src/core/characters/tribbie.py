@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING
 
 from ..buff import Buff, BuffDuration, StackRule
 from ..damage import DamageType
+from ..eidolon import get_rank_param
 from ..skill import SkillEffect, SkillType, get_skill_by_type
 from . import register
 from .base import CharacterModule, module_params
@@ -112,6 +113,13 @@ class TribbieModule(CharacterModule):
     a6_max_stacks: int = TRACE_A6_STACKS
     a6_turns: int = TRACE_A6_TURNS
 
+    # ── 星魂状态 ─────────────────────────────────────────
+    eidolon_rank: int = 0
+    e2_added_mult: float = 1.0          # E2：结界附加伤害倍率
+    e2_extra_hits: int = 0              # E2：额外附加伤害次数
+    e4_def_ignore: float = 0.0          # E4：神启期间我方全体无视防御
+    e4_contribution: float = 0.0        # E4 对 enemy.def_reduce 的贡献
+
     # ── 事件钩子 ─────────────────────────────────────────
 
     def on_battle_start(self, sim: BattleSimulator, char: CharacterUnit) -> None:
@@ -126,6 +134,20 @@ class TribbieModule(CharacterModule):
         self._action_stats = {}
         # 读取行迹额外能力参数
         self._read_trace_params(char)
+
+        # 星魂参数
+        self.eidolon_rank = max(0, min(6, int(getattr(char, "rank", 0))))
+        if self.eidolon_rank >= 2:
+            self.e2_added_mult = get_rank_param(char.ranks_raw, 2, 0, 1.2)
+            self.e2_extra_hits = int(get_rank_param(char.ranks_raw, 2, 1, 1))
+        else:
+            self.e2_added_mult = 1.0
+            self.e2_extra_hits = 0
+        self.e4_def_ignore = (
+            get_rank_param(char.ranks_raw, 4, 0, 0.18)
+            if self.eidolon_rank >= 4 else 0.0
+        )
+        self.e4_contribution = 0.0
         # 【岔路旁的小石子】：战斗开始恢复 30 点能量（走能量恢复效率乘区）
         if self.a4_start_energy:
             sim.recover_energy(char, self.a4_start_energy)
@@ -135,6 +157,7 @@ class TribbieModule(CharacterModule):
             turns=int(module_params(char.skills.get(SKILL_TECHNIQUE), 1, 3)),
             ratio=module_params(char.skills.get(SKILL_SKILL), 1, 0.12),
         )
+        self._sync_e4_def_ignore(sim, char)
 
     def on_turn_start(self, sim: BattleSimulator, char: CharacterUnit) -> None:
         """自身回合开始：结界剩余回合 -1，归零时解除结界。
@@ -149,6 +172,7 @@ class TribbieModule(CharacterModule):
         self.field_turns -= 1
         if self.field_turns <= 0:
             self._close_field(sim, char)
+        self._sync_e4_def_ignore(sim, char)
 
     def on_skill_cast(
         self,
@@ -172,6 +196,7 @@ class TribbieModule(CharacterModule):
                 turns=int(module_params(skill, 2, 3)),
                 ratio=module_params(skill, 1, 0.12),
             )
+            self._sync_e4_def_ignore(sim, char)
         elif skill_id == SKILL_ULTRA:
             # 终结技：全体生命上限伤害（#1，多敌人）+ 开启结界（易伤影响本体伤害，
             # 故在伤害结算前 on_skill_cast 开启，本体伤害吃到易伤）。
@@ -373,6 +398,24 @@ class TribbieModule(CharacterModule):
         for enemy in sim.enemies:
             enemy.vulnerability += diff
 
+    def _oracle_active(self, char: CharacterUnit) -> bool:
+        """缇宝当前是否处于【神启】状态。"""
+        return any(buff.name == ORACLE_BUFF_NAME for buff in char.buff_mgr.buffs)
+
+    def _sync_e4_def_ignore(self, sim: BattleSimulator, char: CharacterUnit) -> None:
+        """E4：神启持续期间，我方全体造成伤害时无视目标 #1 防御。
+
+        当前伤害公式把 def_ignore 与 def_reduce 加性合并，因此用
+        enemy.def_reduce 的增量贡献实现，与其他模块减防共存。
+        """
+        rate = self.e4_def_ignore if self._oracle_active(char) else 0.0
+        diff = rate - self.e4_contribution
+        if abs(diff) < 1e-12:
+            return
+        self.e4_contribution = rate
+        for enemy in sim.enemies:
+            enemy.def_reduce += diff
+
     def _normal_adjacent(
         self,
         sim: BattleSimulator,
@@ -466,7 +509,7 @@ class TribbieModule(CharacterModule):
         - stats 为命中时的属性快照（避免延迟结算吃到行动中段新增的 buff）。
         """
         ultra = char.skills.get(SKILL_ULTRA)
-        mult = module_params(ultra, 3, 0.0)
+        mult = module_params(ultra, 3, 0.0) * self.e2_added_mult
         if mult <= 0:
             return
         effect = SkillEffect(
@@ -476,10 +519,12 @@ class TribbieModule(CharacterModule):
             toughness_damage=0,  # TODO: 附加伤害削韧待勘探
             element=ELEMENT,
         )
-        sim.deal_damage(
-            char, target, effect,
-            skill_type=SkillType.ADDED, log=log, is_attack=False, stats=stats,
-        )
+        hits = 1 + self.e2_extra_hits
+        for _ in range(hits):
+            sim.deal_damage(
+                char, target, effect,
+                skill_type=SkillType.ADDED, log=log, is_attack=False, stats=stats,
+            )
 
     def _ultra_follow_up(self, sim: BattleSimulator, ult_char: CharacterUnit) -> None:
         """天赋【好忙好忙的缇宝】：其他角色施放终结技后，缇宝对敌方全体

@@ -127,6 +127,8 @@ class CharacterUnit:
     current_hp: float = 0.0  # 当前生命值（我方 HP 模型：setup() 初始化为面板生命上限，
     #                        生命消耗/回复由角色模块读写；上限取 final_stats().hp）
     skill_trees_raw: dict = field(default_factory=dict)  # 原始行迹（模块读额外能力参数用）
+    rank: int = 0                # 星魂等级 0~6（freesr data.rank / UI 队伍配置）
+    ranks_raw: dict = field(default_factory=dict)  # nanoka ranks 原始数据（星魂效果模块用）
 
     def __post_init__(self) -> None:
         self.buff_mgr.unit_id = self.unit_id

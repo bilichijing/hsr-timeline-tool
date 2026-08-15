@@ -137,6 +137,27 @@ class TestBuildCharacterUnit:
         char = self._build(sp_need=0)
         assert char.base_stats.energy_max == 100.0
 
+    def test_eidolon_skill_level_bonus(self):
+        """通用 E1/E3 技能等级加成：终结技+2、战技+2、普攻+1。"""
+        ranks = {
+            "1": {
+                "id": 101, "name": "一魂",
+                "desc": "终结技等级+2，最多不超过15级。", "param_list": [],
+            },
+            "3": {
+                "id": 103, "name": "三魂",
+                "desc": "战技等级+2，最多不超过15级；普攻等级+1，最多不超过10级。",
+                "param_list": [],
+            },
+        }
+        char = self._build(rank=3, ranks_raw=ranks)
+        normal = next(s for s in char.skills.values() if s.skill_type == SkillType.NORMAL)
+        skill = next(s for s in char.skills.values() if s.skill_type == SkillType.SKILL)
+        ultra = next(s for s in char.skills.values() if s.skill_type == SkillType.ULTRA)
+        assert normal.params[0] == pytest.approx(0.6)          # 基础 1 + 1 → L2
+        assert skill.params[0] == pytest.approx(1.0 + 2 / 9)   # 基础 1 + 2 → L3
+        assert ultra.params[0] == pytest.approx(2 + 2 * 2 / 9)  # 基础 1 + 2 → L3
+
 
 # ── 行迹属性加成 ───────────────────────────────────────────
 

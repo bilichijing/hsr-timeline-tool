@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING
 
 from ..buff import Buff, BuffDuration, StackRule
 from ..damage import DamageType
+from ..eidolon import get_rank_param
 from ..skill import SkillEffect, SkillType, get_skill_by_type
 from . import register
 from .base import CharacterModule, module_params
@@ -94,6 +95,13 @@ class MortenaxModule(CharacterModule):
     # 【百炼骨】能量恢复比例（on_battle_start 时从行迹额外能力读取）
     energy_ratio: float = TRACE_ENERGY_RATIO
 
+    # ── 星魂状态 ─────────────────────────────────────────
+    eidolon_rank: int = 0              # 当前星魂等级（0~6）
+    charge_limit: int = CHARGE_MAX     # 充能上限（E2 后降低）
+    e1_res_reduce: float = 0.0         # E1：结界期间敌方全体全属性抗性降低
+    e6_enhanced_mult: float = 1.0      # E6：强化终结技倍率系数
+    _e1_res_original: dict[str, dict[str, float]] = {}  # E1 抗性原始值（退出结界恢复）
+
     # ── 事件钩子 ─────────────────────────────────────────
 
     def on_battle_start(self, sim: BattleSimulator, char: CharacterUnit) -> None:
@@ -106,6 +114,21 @@ class MortenaxModule(CharacterModule):
         # 【百炼骨】额外能力：战斗开始时若能量不足 75% 则立刻恢复至 75%
         self._read_trace_params(char)
         self._regen_energy_to_ratio(sim, char)
+
+        # 星魂参数
+        self.eidolon_rank = max(0, min(6, int(getattr(char, "rank", 0))))
+        self.charge_limit = int(self.CHARGE_MAX)
+        if self.eidolon_rank >= 2:
+            self.charge_limit = int(get_rank_param(char.ranks_raw, 2, 1, self.CHARGE_MAX))
+        self.e1_res_reduce = (
+            get_rank_param(char.ranks_raw, 1, 0, 0.20)
+            if self.eidolon_rank >= 1 else 0.0
+        )
+        self.e6_enhanced_mult = (
+            get_rank_param(char.ranks_raw, 6, 0, 1.0)
+            if self.eidolon_rank >= 6 else 1.0
+        )
+        self._e1_res_original = {}
 
     def on_resolve_skill(
         self,
@@ -191,8 +214,7 @@ class MortenaxModule(CharacterModule):
             return
         self._charged_tokens.add(action_token)
         # 充能 +1（封顶需求值；无法施放战技时保留）
-        talent = get_skill_by_type(char.skills, SkillType.TALENT)
-        need = int(module_params(talent, 1, 9))
+        need = self._talent_charge_need(char)
         self.charge = min(self.charge + 1, need)
         self._talent_proc(sim, char)
 
@@ -255,7 +277,10 @@ class MortenaxModule(CharacterModule):
             f"防御降低 {def_part * 100:.1f}%、易伤 {vuln_part * 100:.1f}%，"
             f"剩余 {turns_left:.0f} 个敌方回合"
         )
-        return [("煞火缠身", desc)]
+        buffs: list[tuple[str, str]] = [("煞火缠身", desc)]
+        if self.rage and self.e1_res_reduce > 0:
+            buffs.append(("我殁之前，我仍未成形", f"敌方全体全属性抗性降低 {self.e1_res_reduce * 100:.1f}%"))
+        return buffs
 
     # ── 私有辅助 ─────────────────────────────────────────
 
@@ -291,6 +316,12 @@ class MortenaxModule(CharacterModule):
         if char.energy < target:
             char.energy = target
 
+    def _talent_charge_need(self, char: CharacterUnit) -> int:
+        """天赋充能触发阈值（E2 上限降低时同步降低）。"""
+        talent = get_skill_by_type(char.skills, SkillType.TALENT)
+        base = int(module_params(talent, 1, 9))
+        return min(base, self.charge_limit)
+
     def _can_cast_skill(self, char: CharacterUnit) -> bool:
         """战技可施放：处于无量忿怒且当前生命 >1。"""
         return self.rage and char.current_hp > 1
@@ -324,6 +355,7 @@ class MortenaxModule(CharacterModule):
 
         # 无量忿怒：暴击率 #2、暴伤 #3
         self.rage = True
+        self._apply_e1_res(sim)
         char.buff_mgr.add(Buff(
             id=f"rage_crit_rate_{char.unit_id}",
             name="无量忿怒",
@@ -395,7 +427,7 @@ class MortenaxModule(CharacterModule):
         """强化终结技「千冶铸一，万劫烬灭」：全体生命上限伤害（#1）。"""
         if not sim.enemies:
             return
-        mult = module_params(skill, 1, 0.0)
+        mult = module_params(skill, 1, 0.0) * self.e6_enhanced_mult
         toughness = self._skill_toughness(skill)
         for enemy in sim.enemies:
             self._deal_hit(
@@ -450,6 +482,27 @@ class MortenaxModule(CharacterModule):
         enemy.vulnerability += vuln_part
         self.blaze[enemy.unit_id] = (turns, def_part, vuln_part)
 
+    def _apply_e1_res(self, sim: BattleSimulator) -> None:
+        """E1：结界展开期间降低敌方全体全属性抗性（保存原值以便恢复）。"""
+        if self.e1_res_reduce <= 0 or self._e1_res_original:
+            return
+        for enemy in sim.enemies:
+            self._e1_res_original[enemy.unit_id] = dict(enemy.resistance)
+            enemy.resistance = {
+                element: value - self.e1_res_reduce
+                for element, value in enemy.resistance.items()
+            }
+
+    def _restore_e1_res(self, sim: BattleSimulator) -> None:
+        """退出结界：恢复 E1 修改前的抗性表。"""
+        if not self._e1_res_original:
+            return
+        for enemy in sim.enemies:
+            original = self._e1_res_original.get(enemy.unit_id)
+            if original is not None:
+                enemy.resistance = dict(original)
+        self._e1_res_original = {}
+
     def _exit_rage(self, sim: BattleSimulator, char: CharacterUnit) -> None:
         """结界解除：退出无量忿怒、清除 buff 与倒计时记录。
 
@@ -457,19 +510,20 @@ class MortenaxModule(CharacterModule):
         """
         self.rage = False
         self.countdown_unit_id = ""
+        self._restore_e1_res(sim)
         char.buff_mgr.remove_by_name("无量忿怒")
         # 【百炼骨】：结界解除时若能量不足 75% 则立刻恢复至 75%
         self._regen_energy_to_ratio(sim, char)
 
     def _talent_proc(self, sim: BattleSimulator, char: CharacterUnit) -> None:
         """充能达标且可施放战技 → 消耗充能、恢复能量、额外施放战技。"""
-        talent = get_skill_by_type(char.skills, SkillType.TALENT)
-        need = int(module_params(talent, 1, 9))
+        need = self._talent_charge_need(char)
         if self.charge < need:
             return
         if not self._can_cast_skill(char):
             return  # 生命 ≤1 无法施放：充能保留（已封顶，待生命恢复后触发）
         self.charge = max(0.0, self.charge - need)
+        talent = get_skill_by_type(char.skills, SkillType.TALENT)
         # 恢复能量（#2，无"固定"字样，走能量恢复效率乘区）
         sim.recover_energy(char, module_params(talent, 2, 15))
         self._cast_extra_skill(sim, char)
@@ -502,6 +556,12 @@ class MortenaxModule(CharacterModule):
             self._follow_up_deal(
                 sim, char, sim.random_enemy(), module_params(skill, 3, 0.0), 0, log, token,
             )
+        # E1：施放天赋的额外战技后，无量忿怒倒计时行动延后 #2
+        if self.eidolon_rank >= 1 and self.countdown_unit_id:
+            delay = get_rank_param(char.ranks_raw, 1, 1, 0.15)
+            if delay > 0:
+                sim.action_queue.apply_push(self.countdown_unit_id, delay)
+
         # 战技回能（sp_base=30；"视为追加攻击"仅改伤害类型，回能按战技）
         sim.recover_energy(char, skill.energy_recover)
         # 同步日志快照

@@ -755,3 +755,35 @@ class TestEnergySp:
         """终结技（bp_need=-1）不回复战技点。"""
         skill = parse_all_skills(_mortenax_skills_raw(), level=1)["150703"]
         assert skill.sp_cost == 0
+
+
+class TestEidolons:
+    """星魂参数加载测试（完整战斗效果由核心机制测试覆盖）。"""
+
+    def _with_rank(self, rank: int, ranks: dict):
+        char = _make_mortenax()
+        char.rank = rank
+        char.ranks_raw = ranks
+        sim = _make_sim(char, _make_enemy())
+        return char, sim, _module(sim)
+
+    def test_e2_charge_limit(self):
+        """E2：充能上限降低至 7。"""
+        _, _, module = self._with_rank(2, {
+            "2": {"id": 150702, "name": "二魂", "desc": "充能上限降低", "param_list": [0.75, 7]},
+        })
+        assert module.charge_limit == 7
+
+    def test_e6_enhanced_mult(self):
+        """E6：强化终结技倍率提高为原倍率的 150%。"""
+        _, _, module = self._with_rank(6, {
+            "6": {"id": 150706, "name": "六魂", "desc": "倍率提高", "param_list": [1.5]},
+        })
+        assert module.e6_enhanced_mult == 1.5
+
+    def test_e1_res_reduce(self):
+        """E1：结界期间全属性抗性降低 20%。"""
+        _, _, module = self._with_rank(1, {
+            "1": {"id": 150701, "name": "一魂", "desc": "抗性降低", "param_list": [0.2, 0.15]},
+        })
+        assert module.e1_res_reduce == 0.2

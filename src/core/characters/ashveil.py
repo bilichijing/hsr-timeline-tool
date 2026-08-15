@@ -29,7 +29,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ..buff import Buff, BuffDuration, StackRule
 from ..damage import DamageType
+from ..eidolon import get_rank_param
 from ..skill import SkillEffect, SkillType, get_skill_by_type
 from . import register
 from .base import CharacterModule, module_params
@@ -66,6 +68,13 @@ class AshveilModule(CharacterModule):
     # 本模块对敌方 def_reduce 的贡献值（增量式累加/撤销，
     # 与千冶【煞火缠身】等其余模块的减防贡献共存）
     def_reduce_contribution: float = 0.0
+    # ── 星魂状态 ─────────────────────────────────────────
+    eidolon_rank: int = 0
+    greed_cap: int = 12               # 婪酣上限（E2 提高到 18）
+    e2_return_rate: float = 0.0       # E2：强化追击后返还已移除婪酣的比例
+    e4_atk_buff: float = 0.0          # E4：终结技后攻击力提高
+    e4_atk_turns: int = 0
+
     # 已处理天赋的受击行动令牌集合（按行动计：一次攻击行动的多段命中
     # 只触发一次"固定回 8 能量 + 追击判定"，避免战技 5 段回 5 次）。
     # 用集合而非单值：连锁触发（追击/追加战技 begin_new_action）后令牌
@@ -81,6 +90,26 @@ class AshveilModule(CharacterModule):
         self.bait_unit_id = ""
         self.greed = 0
         self._proc_tokens = set()
+
+        # 星魂参数
+        self.eidolon_rank = max(0, min(6, int(getattr(char, "rank", 0))))
+        self.greed_cap = (
+            int(get_rank_param(char.ranks_raw, 2, 0, 18))
+            if self.eidolon_rank >= 2
+            else int(module_params(talent, 6, 12))
+        )
+        self.e2_return_rate = (
+            get_rank_param(char.ranks_raw, 2, 1, 0.35)
+            if self.eidolon_rank >= 2 else 0.0
+        )
+        self.e4_atk_buff = (
+            get_rank_param(char.ranks_raw, 4, 0, 0.40)
+            if self.eidolon_rank >= 4 else 0.0
+        )
+        self.e4_atk_turns = (
+            int(get_rank_param(char.ranks_raw, 4, 1, 3))
+            if self.eidolon_rank >= 4 else 0
+        )
         # 战斗开始：当前场上生命值最低的敌方单体成为饲饵
         lowest = self._lowest_hp_enemy(sim)
         if lowest is not None:
@@ -106,6 +135,7 @@ class AshveilModule(CharacterModule):
         elif skill_id == SKILL_ULTRA:
             # 终结技：先标记饲饵（首段伤害即可享受减防）
             self._set_bait(sim, char, target)
+            self._apply_e4_atk_buff(sim, char)
 
     def on_attack_hit(
         self,
@@ -172,9 +202,15 @@ class AshveilModule(CharacterModule):
         # 每消耗 #3 层婪酣额外 1 段（#4 倍率）
         # 婪酣额外攻击不提供追加攻击回能（用户实测校准）
         greed_cost = int(module_params(ultra, 3, 4))
+        greed_before = self.greed
         while self.greed >= greed_cost:
             self.greed -= greed_cost
             self._follow_up_attack(sim, char, target, mult, notes="婪酣追击", energy_recover=0)
+        # E2：强化天赋追加攻击后，返还本次移除婪酣层数的 #2
+        removed = greed_before - self.greed
+        if self.e2_return_rate > 0 and removed > 0:
+            refund = int(removed * self.e2_return_rate)
+            self.greed = min(self.greed_cap, self.greed + refund)
         # TODO: 致命攻击转移未建模（需敌人 HP/死亡模型）：
         #   追击击杀饲饵后应转移到新饲饵继续打，直至婪酣 < #3 层。
 
@@ -319,9 +355,26 @@ class AshveilModule(CharacterModule):
                 sim, char, self._bait(sim), mult,
                 notes="天赋追击", energy_recover=talent.energy_recover,
             )
-        # 获得婪酣（钳制上限）
-        greed_max = int(module_params(talent, 6, 12))
-        self.greed = min(self.greed + int(module_params(talent, 5, 2)), greed_max)
+        # 获得婪酣（钳制上限；E2 提高上限）
+        self.greed = min(
+            self.greed + int(module_params(talent, 5, 2)),
+            self.greed_cap,
+        )
+
+    def _apply_e4_atk_buff(self, sim: BattleSimulator, char: CharacterUnit) -> None:
+        """E4：施放终结技时攻击力提高 #1，持续 #2 回合。"""
+        if self.e4_atk_buff <= 0:
+            return
+        char.buff_mgr.add(Buff(
+            id="ashveil_e4_atk",
+            name="切记，不必咀嚼真相",
+            stat="atk_pct",
+            value=self.e4_atk_buff,
+            duration_type=BuffDuration.TURNS_SELF_START,
+            duration_count=self.e4_atk_turns,
+            source_unit=char.unit_id,
+            stack_rule=StackRule.NO_STACK_SAME_NAME,
+        ))
 
     def _bait(self, sim: BattleSimulator) -> EnemyState | None:
         """当前饲饵敌人实例。"""

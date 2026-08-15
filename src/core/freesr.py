@@ -267,7 +267,7 @@ def parse_freesr(data: dict) -> FreesrProfile:
         char_id = str(item.get("avatar_id", avatar_id))
         profile.avatars[char_id] = FreesrAvatar(
             char_id=char_id,
-            rank=int(item_data.get("rank", 0) or 0),
+            rank=max(0, min(6, int(item_data.get("rank", 0) or 0))),
             skill_levels=extract_skill_levels(char_id, item_data.get("skills", {})),
             sp_max=int(item.get("sp_max", 100) or 100),
             sp_value=int(item.get("sp_value", 0) or 0),

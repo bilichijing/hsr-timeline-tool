@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .eidolon import rank_skill_level_bonuses
 from .simulator import CharacterUnit
 from .skill import SkillType, parse_all_skills
 from .stats import BaseStats, StatBonus
@@ -113,6 +114,8 @@ def build_character_unit(
     dmg_bonus: float = 0.0,
     initial_energy: float = 0.0,
     skill_trees_raw: dict | None = None,
+    rank: int = 0,
+    ranks_raw: dict | None = None,
 ) -> CharacterUnit:
     """构造带真实技能与面板的角色单位。
 
@@ -131,17 +134,24 @@ def build_character_unit(
         dmg_bonus: 属性增伤（角色自身属性，UI 表格"属性增伤"列）
         initial_energy: 战斗开始初始能量（freesr sp_value）
         skill_trees_raw: 原始行迹（CharacterInfo.skill_trees），提取行迹属性加成
+        rank: 星魂等级 0~6
+        ranks_raw: nanoka ranks 原始数据（角色模块读星魂参数）
     """
     base = convert_stats80(stats80)
     base.energy_max = float(sp_need) if sp_need > 0 else 100.0
     # 行迹属性加成（攻击%/暴击伤害/属性伤害等，满行迹常驻）
     bonus = extract_trace_bonuses(skill_trees_raw)
     bonus = bonus.add(StatBonus(dmg_bonus=dmg_bonus))
+    # 星魂技能等级加成（E3/E5 常见：终结技/战技/天赋+2、普攻+1）
+    effective_skill_levels = dict(skill_levels or {})
+    for bonus_type, bonus in rank_skill_level_bonuses(ranks_raw, rank).items():
+        effective_skill_levels[bonus_type] = effective_skill_levels.get(bonus_type, level) + bonus
+
     skills = parse_all_skills(
         skills_raw,
         level=level,
         ultra_energy_cost=sp_need,
-        skill_levels=skill_levels,
+        skill_levels=effective_skill_levels,
     )
     return CharacterUnit(
         unit_id=unit_id,
@@ -156,4 +166,6 @@ def build_character_unit(
         char_id=char_id,
         initial_energy=initial_energy,
         skill_trees_raw=skill_trees_raw or {},
+        rank=rank,
+        ranks_raw=ranks_raw or {},
     )

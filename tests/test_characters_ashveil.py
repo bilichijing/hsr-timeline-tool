@@ -582,3 +582,38 @@ class TestUltraInterruptTiming:
         sim.restore(snap_before)
         assert sim.pending_av_actor is None
         assert sim.total_av == 0.0
+
+
+class TestEidolons:
+    """星魂参数加载测试（完整战斗效果由核心机制测试覆盖）。"""
+
+    def _with_rank(self, rank: int, ranks: dict):
+        char = _make_ashveil()
+        char.rank = rank
+        char.ranks_raw = ranks
+        enemy = EnemyState(
+            unit_id="e1", name="木桩",
+            max_toughness=300, current_toughness=300,
+            weakness_elements=["Thunder"], speed=50,
+        )
+        sim = BattleSimulator(characters=[char], enemies=[enemy])
+        sim.setup()
+        module = sim.char_modules[char.unit_id]
+        assert isinstance(module, AshveilModule)
+        return char, sim, module
+
+    def test_e2_greed_cap_and_refund(self):
+        """E2：婪酣上限提高至 18，返还已移除层数的 35%。"""
+        _, _, module = self._with_rank(2, {
+            "2": {"id": 150402, "name": "二魂", "desc": "上限提高", "param_list": [18, 0.35]},
+        })
+        assert module.greed_cap == 18
+        assert module.e2_return_rate == 0.35
+
+    def test_e4_atk_buff(self):
+        """E4：终结技后攻击力提高 40%，持续 3 回合。"""
+        _, _, module = self._with_rank(4, {
+            "4": {"id": 150404, "name": "四魂", "desc": "攻击提高", "param_list": [0.4, 3]},
+        })
+        assert module.e4_atk_buff == 0.4
+        assert module.e4_atk_turns == 3

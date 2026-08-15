@@ -621,3 +621,29 @@ class TestWithOtherModules:
         # 缇宝终结技：命中 1 次行动 → 充能 +1；附加伤害不计 → 共 2
         _ultra(sim, "tribbie")
         assert sim.char_modules["mortenax"].charge == 2
+
+
+class TestEidolons:
+    """星魂参数加载测试（完整战斗效果由核心机制测试覆盖）。"""
+
+    def _with_rank(self, rank: int, ranks: dict):
+        char = _make_tribbie()
+        char.rank = rank
+        char.ranks_raw = ranks
+        sim = _make_sim(char)
+        return char, sim, _module(sim)
+
+    def test_e2_added_damage_params(self):
+        """E2：结界附加伤害提高至 120%，额外造成 1 次。"""
+        _, _, module = self._with_rank(2, {
+            "2": {"id": 140302, "name": "二魂", "desc": "附加伤害提高", "param_list": [1.2, 1]},
+        })
+        assert module.e2_added_mult == 1.2
+        assert module.e2_extra_hits == 1
+
+    def test_e4_def_ignore(self):
+        """E4：神启期间无视 18% 防御。"""
+        _, _, module = self._with_rank(4, {
+            "4": {"id": 140304, "name": "四魂", "desc": "无视防御", "param_list": [0.18]},
+        })
+        assert module.e4_def_ignore == 0.18
