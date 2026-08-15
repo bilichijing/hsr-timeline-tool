@@ -156,7 +156,7 @@ class TestRegistration:
         char, enemy = _make_mortenax(), _make_enemy()
         sim = _make_sim(char, enemy)
         mod = _module(sim)
-        assert mod.current_hp == pytest.approx(10000)
+        assert char.current_hp == pytest.approx(10000)
         assert mod.rage is False
         assert mod.charge == 0
 
@@ -214,7 +214,7 @@ class TestSkill:
         sim = _make_sim(char, enemy)
         _act(sim, SkillType.ULTRA)
         _freeze_countdown(sim)
-        _module(sim).current_hp = 1
+        char.current_hp = 1
         _act(sim, SkillType.SKILL)
         assert "无法施放" in sim.logs[-1].notes
 
@@ -224,11 +224,11 @@ class TestSkill:
         sim = _make_sim(char, enemy)
         sp_before = sim.sp.current
         _act(sim, SkillType.ULTRA)
-        assert _module(sim).current_hp == pytest.approx(8000)  # 终结技耗 20%
+        assert char.current_hp == pytest.approx(8000)  # 终结技耗 20%
         _freeze_countdown(sim)
         _act(sim, SkillType.SKILL)
         # 生命消耗 10%
-        assert _module(sim).current_hp == pytest.approx(7000)
+        assert char.current_hp == pytest.approx(7000)
         # 伤害 = (3600 + 4×1200) × 易伤 1.3 × 防御系数
         def_factor = 100 / (100 + 100 * 0.8)
         assert sim.logs[-1].total_damage == pytest.approx((3600 + 4 * 1200) * 1.3 * def_factor)
@@ -243,9 +243,9 @@ class TestSkill:
         sim = _make_sim(char, enemy)
         _act(sim, SkillType.ULTRA)
         _freeze_countdown(sim)
-        _module(sim).current_hp = 500
+        char.current_hp = 500
         _act(sim, SkillType.SKILL)
-        assert _module(sim).current_hp == pytest.approx(1)
+        assert char.current_hp == pytest.approx(1)
 
 
 # ── 终结技 / 无量忿怒 ─────────────────────────────────────
@@ -262,7 +262,7 @@ class TestUltraRage:
         # 本体无伤害
         assert log.total_damage == 0
         # 生命消耗 20%
-        assert mod.current_hp == pytest.approx(8000)
+        assert char.current_hp == pytest.approx(8000)
         # 无量忿怒 buff（暴击率 +20%、暴伤 +30%）
         assert mod.rage is True
         rage_buffs = [b for b in char.buff_mgr.buffs if b.name == "无量忿怒"]
@@ -324,9 +324,9 @@ class TestUltraRage:
         """生命不足：终结技消耗使当前生命降至 1。"""
         char, enemy = _make_mortenax(), _make_enemy()
         sim = _make_sim(char, enemy)
-        _module(sim).current_hp = 500
+        char.current_hp = 500
         _act(sim, SkillType.ULTRA)
-        assert _module(sim).current_hp == pytest.approx(1)
+        assert char.current_hp == pytest.approx(1)
 
 
 # ── 天赋充能 / 因果尽偿 ───────────────────────────────────
@@ -377,7 +377,7 @@ class TestTalentCharge:
         def_factor = 100 / (100 + 100 * 0.8)
         assert fu_logs[-1].total_damage == pytest.approx((3600 + 4 * 1200) * 1.3 * def_factor)
         # 额外战技消耗生命（8000 - 1000 = 7000；普攻不耗生命）
-        assert mod.current_hp == pytest.approx(7000)
+        assert char.current_hp == pytest.approx(7000)
 
     def test_charge_retained_when_uncastable(self):
         """生命 ≤1 时充能达标不触发（保留），生命恢复后触发。"""
@@ -388,13 +388,13 @@ class TestTalentCharge:
         mod = _module(sim)
         # 充能 8、生命 1
         mod.charge = 8
-        mod.current_hp = 1
+        char.current_hp = 1
         _act(sim, SkillType.NORMAL)
         # 充能达到 9 但无法施放：保留
         assert mod.charge == pytest.approx(9)
         assert not any(l.action_type == "follow_up" for l in sim.logs)
         # 生命恢复后下一次攻击触发
-        mod.current_hp = 5000
+        char.current_hp = 5000
         _act(sim, SkillType.NORMAL)
         assert any(l.action_type == "follow_up" for l in sim.logs)
         assert mod.charge == pytest.approx(1)
@@ -407,7 +407,7 @@ class TestTalentCharge:
         _freeze_countdown(sim)
         mod = _module(sim)
         mod.charge = 9
-        mod.current_hp = 1  # 无法触发，验证封顶
+        char.current_hp = 1  # 无法触发，验证封顶
         _act(sim, SkillType.NORMAL)
         assert mod.charge == pytest.approx(9)
 
@@ -509,7 +509,7 @@ class TestSkillDenyReason:
         char, enemy = _make_mortenax(), _make_enemy()
         sim = _make_sim(char, enemy)
         _act(sim, SkillType.ULTRA)
-        _module(sim).current_hp = 1
+        char.current_hp = 1
         assert "生命值" in _module(sim).skill_deny_reason(sim, char)
 
     def test_allowed_in_rage(self):

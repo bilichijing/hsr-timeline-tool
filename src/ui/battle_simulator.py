@@ -18,6 +18,7 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QObject, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QFont, QPalette
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -31,6 +32,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -58,7 +60,8 @@ from src.core.character_factory import (
     convert_stats80,
     extract_trace_bonuses,
 )
-from src.core.damage import DamageType
+from src.core.buff import BuffDuration
+from src.core.damage import DamageType, build_enemy_resistance
 from src.core.freesr import compute_panel, lightcone_base_stats, parse_freesr
 from src.core.stats import StatCalculator
 from src.core.simulator import (
@@ -66,6 +69,7 @@ from src.core.simulator import (
     BattleSimulator,
     BattleResult,
     CharacterUnit,
+    EnemyAttack,
     EnemyState,
     PlayerAction,
 )
@@ -74,6 +78,7 @@ from src.core.stats import BaseStats, StatBonus
 from src.ui.theme import DARK_STYLE, Colors, ELEMENT_COLORS, PATH_COLORS
 from src.ui.widgets.character_picker import CharacterPickerDialog, _load_character_icon
 from src.ui.widgets.damage_pie import DamagePieChartWidget
+from src.ui.widgets.enemy_target import EnemyTargetWidget
 from src.ui.widgets.sp_indicator import SPIndicatorWidget
 from src.ui.widgets.energy_orb import EnergyOrbWidget
 from src.ui.widgets.timeline_gantt import (
@@ -95,11 +100,12 @@ ACTION_NAMES_ZH: dict[str, str] = {
     "aha_moment": "阿哈时刻",
     "follow_up": "追加攻击",
     "technique": "秘技",
+    "enemy_attack": "敌方攻击",
 }
 
 
-# 队伍配置缓存文件（cache 目录已 gitignore）
-TEAM_CONFIG_PATH = Path("./cache/team_config.json")
+# 配置缓存文件（cache 目录已 gitignore）
+CONFIG_PATH = Path("./cache/team_config.json")
 
 
 # ── 队伍表格行数据与列号 ──────────────────────────────────
@@ -124,6 +130,104 @@ TABLE_HEADERS = [
     "暴击率", "暴击伤害", "击破特攻", "效果抵抗",
     "能量恢复效率", "效果命中", "治疗量加成", "属性增伤",
 ]
+
+
+class _WheelBlocker(QObject):
+    """事件过滤器：吞掉滚轮事件，防止数值框/下拉框被误滚改值。"""
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        if event.type() == QEvent.Wheel:
+            return True
+        return super().eventFilter(obj, event)
+
+
+def _disable_wheel_inputs(root: QWidget) -> None:
+    """禁用 root 下所有数值框/下拉框的滚轮改值（防止误操作）。"""
+    targets = list(root.findChildren(QAbstractSpinBox))
+    targets += list(root.findChildren(QComboBox))
+    for widget in targets:
+        widget.installEventFilter(_WheelBlocker(widget))
+
+
+class _EnemyAttackTargetButton(QPushButton):
+    """敌方攻击的目标角色选择按钮（下拉多选，显示真实角色名）。
+
+    相比在表格单元格里平铺 4 个勾选框，这个控件占一个单元格，
+    通过 QMenu 选择当前队伍中的角色，界面更紧凑、标签更直观。
+    """
+
+    SLOT_COUNT = 4
+
+    def __init__(
+        self,
+        names_provider,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__("未选择", parent)
+        self._names_provider = names_provider
+        self._selected_indices: set[int] = set()
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumWidth(140)
+        self.setToolTip("点击选择本次敌方攻击命中的角色（可多选）")
+        self.clicked.connect(self._show_menu)
+        self.refresh_text()
+
+    # ── 对外接口 ─────────────────────────────────────
+
+    def set_target_indices(self, indices) -> None:
+        """设置已选角色槽位（0-3，队伍表行号）。"""
+        self._selected_indices.clear()
+        for raw in indices or []:
+            try:
+                index = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= index < self.SLOT_COUNT:
+                self._selected_indices.add(index)
+        self.refresh_text()
+
+    def target_indices(self) -> list[int]:
+        """返回已选角色槽位（升序）。"""
+        return sorted(self._selected_indices)
+
+    def refresh_text(self) -> None:
+        """根据当前队伍名称刷新按钮文本。"""
+        names = self._names_provider() if callable(self._names_provider) else []
+        selected_names = [
+            names[i] for i in self.target_indices()
+            if i < len(names) and names[i]
+        ]
+        configured_count = len([n for n in names if n])
+        if configured_count >= 2 and len(selected_names) == configured_count:
+            self.setText("全部角色")
+        elif selected_names:
+            self.setText("、".join(selected_names))
+        else:
+            self.setText("未选择")
+
+    # ── 内部实现 ─────────────────────────────────────
+
+    def _show_menu(self, *_args) -> None:
+        menu = QMenu(self)
+        names = self._names_provider() if callable(self._names_provider) else []
+        for i in range(self.SLOT_COUNT):
+            name = names[i] if i < len(names) and names[i] else ""
+            label = f"{i + 1}. {name}" if name else f"{i + 1}. 未配置角色"
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(i in self._selected_indices)
+            action.setEnabled(bool(name))
+            action.triggered.connect(
+                lambda checked, slot=i: self._toggle_slot(slot, checked)
+            )
+        menu.exec(self.mapToGlobal(self.rect().bottomLeft()))
+        self.refresh_text()
+
+    def _toggle_slot(self, index: int, checked: bool) -> None:
+        if checked:
+            self._selected_indices.add(index)
+        else:
+            self._selected_indices.discard(index)
 
 
 @dataclass
@@ -378,8 +482,8 @@ class BattleSimulatorWindow(QMainWindow):
 
         self._init_ui()
         self._load_default_config()
-        # 队伍配置缓存：有则自动恢复上次关闭时的队伍
-        self._load_team_config()
+        # 配置缓存：有则自动恢复上次关闭时的全部配置
+        self._load_config()
 
     # ── UI 初始化 ─────────────────────────────────────
 
@@ -537,6 +641,9 @@ class BattleSimulatorWindow(QMainWindow):
         self.team_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.team_table.verticalHeader().setDefaultSectionSize(30)
         self.team_table.setAlternatingRowColors(True)
+        # 固定表格高度：完整显示表头 + 4 行 + 横向滚动条，无需纵向滚动
+        header_h = self.team_table.horizontalHeader().sizeHint().height()
+        self.team_table.setFixedHeight(header_h + 4 * 30 + 32)
         self.team_table.cellDoubleClicked.connect(self._on_team_cell_double_clicked)
         team_layout.addWidget(self.team_table)
         layout.addWidget(team_group)
@@ -547,22 +654,43 @@ class BattleSimulatorWindow(QMainWindow):
         enemy_group = QGroupBox("怪物配置")
         enemy_form = QFormLayout(enemy_group)
         enemy_form.setSpacing(8)
-        self.enemy_name_edit = QPlainTextEdit()
-        self.enemy_name_edit.setPlainText("史莱姆")
-        self.enemy_name_edit.setFixedHeight(32)
-        enemy_form.addRow("名称", self.enemy_name_edit)
+        # 怪物数量（1-5）：场上所有怪物共享韧性/弱点/等级/抗性配置
+        self.enemy_count_spin = QSpinBox()
+        self.enemy_count_spin.setRange(1, 5)
+        self.enemy_count_spin.setValue(1)
+        self.enemy_count_spin.setToolTip("场上怪物数量（1-5），所有怪物共享下方配置")
+        enemy_form.addRow("数量", self.enemy_count_spin)
+        # 种类固定"木桩"：速度 0，不进入行动队列（永不行动）
+        enemy_name_label = QLabel("木桩（速度 0，永不行动）")
+        enemy_name_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; border: none;")
+        enemy_form.addRow("种类", enemy_name_label)
         self.toughness_spin = QSpinBox()
         self.toughness_spin.setRange(1, 1000)
         self.toughness_spin.setValue(60)
         enemy_form.addRow("韧性", self.toughness_spin)
+        self.enemy_hp_spin = QSpinBox()
+        self.enemy_hp_spin.setRange(1, 100_000_000)
+        self.enemy_hp_spin.setValue(100000)
+        self.enemy_hp_spin.setSingleStep(1000)
+        self.enemy_hp_spin.setToolTip("生命值（所有怪物共享）；HP 归零判定死亡离场")
+        enemy_form.addRow("生命值", self.enemy_hp_spin)
         self.weakness_edit = QPlainTextEdit()
         self.weakness_edit.setPlainText("火, 冰")
         self.weakness_edit.setFixedHeight(32)
+        self.weakness_edit.setToolTip("弱点属性对所有怪物生效；持有弱点的对应属性抗性为 0")
         enemy_form.addRow("弱点属性", self.weakness_edit)
         self.enemy_level_spin = QSpinBox()
         self.enemy_level_spin.setRange(1, 100)
         self.enemy_level_spin.setValue(80)
         enemy_form.addRow("等级", self.enemy_level_spin)
+        self.non_weak_resist_spin = QSpinBox()
+        self.non_weak_resist_spin.setRange(0, 100)
+        self.non_weak_resist_spin.setValue(20)
+        self.non_weak_resist_spin.setSuffix(" %")
+        self.non_weak_resist_spin.setToolTip(
+            "非弱点属性抗性（默认 20%）：怪物持有弱点的对应属性抗性为 0，其余属性使用此值"
+        )
+        enemy_form.addRow("非弱点抗性", self.non_weak_resist_spin)
         bottom_layout.addWidget(enemy_group)
 
         params_group = QGroupBox("战斗参数")
@@ -620,7 +748,42 @@ class BattleSimulatorWindow(QMainWindow):
         skill_form.addRow("欢愉技", self.elation_skill_level_spin)
         layout.addWidget(skill_group)
 
+        # 敌方攻击配置（木桩速度 0，按总行动值强制攻击）
+        attack_group = QGroupBox("敌方攻击配置（行动值推进到配置值即强制攻击）")
+        attack_layout = QVBoxLayout(attack_group)
+        attack_btn_row = QHBoxLayout()
+        add_attack_btn = QPushButton("＋ 添加攻击")
+        add_attack_btn.setCursor(Qt.PointingHandCursor)
+        add_attack_btn.clicked.connect(self._add_enemy_attack_row)
+        attack_btn_row.addWidget(add_attack_btn)
+        remove_attack_btn = QPushButton("－ 删除选中")
+        remove_attack_btn.setCursor(Qt.PointingHandCursor)
+        remove_attack_btn.clicked.connect(self._remove_enemy_attack_row)
+        attack_btn_row.addWidget(remove_attack_btn)
+        attack_btn_row.addStretch()
+        attack_layout.addLayout(attack_btn_row)
+        self.enemy_attack_table = QTableWidget(0, 5)
+        self.enemy_attack_table.setHorizontalHeaderLabels(
+            ["总行动值", "释放来源", "攻击力", "目标角色", "恢复能量"]
+        )
+        self.enemy_attack_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.enemy_attack_table.verticalHeader().setDefaultSectionSize(40)
+        self.enemy_attack_table.setAlternatingRowColors(True)
+        self.enemy_attack_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.enemy_attack_table.setToolTip(
+            "每行配置一次敌方攻击；「释放来源」为发动攻击的敌方目标；"
+            "「目标角色」点击按钮后可多选当前队伍中的角色"
+        )
+        attack_layout.addWidget(self.enemy_attack_table)
+        layout.addWidget(attack_group)
+
+        # 队伍名称/行变动时，刷新敌方攻击目标按钮上的角色名
+        self.team_table.itemChanged.connect(self._refresh_enemy_attack_target_buttons)
+
         layout.addStretch()
+
+        # 禁止数值框/下拉框通过滚轮改值（防止误操作）
+        _disable_wheel_inputs(content)
 
         scroll.setWidget(content)
 
@@ -658,6 +821,14 @@ class BattleSimulatorWindow(QMainWindow):
         self.interactive_status_label.setWordWrap(True)
         status_layout.addWidget(self.interactive_status_label)
         layout.addWidget(status_group)
+
+        # 敌方目标选择（有几个敌人就有几个选取对象；普攻/战技/终结技攻击所选目标）
+        target_group = QGroupBox("敌方目标（选择主目标）")
+        self.enemy_target_layout = QHBoxLayout(target_group)
+        self.enemy_target_layout.setSpacing(12)
+        self._enemy_target_buttons: list[EnemyTargetWidget] = []
+        self._selected_enemy_id: str = ""
+        layout.addWidget(target_group)
 
         # 角色能量图标区（含 SP 指示器）
         energy_group = QGroupBox("角色能量  ·  满能量(红色高亮)可释放终结技")
@@ -1304,10 +1475,10 @@ class BattleSimulatorWindow(QMainWindow):
         self._update_element_bonus_tooltips()
         self._update_overview()
 
-    # ── 队伍配置缓存 ─────────────────────────────────
+    # ── 配置缓存 ─────────────────────────────────────
 
-    def _save_team_config(self) -> None:
-        """保存队伍配置（表格内容 + 行数据）到缓存文件。"""
+    def _save_config(self) -> None:
+        """保存全部配置（队伍表格 + 怪物 + 战斗参数 + 技能等级）到缓存文件。"""
         rows = []
         for row in range(self.team_table.rowCount()):
             name_item = self.team_table.item(row, 0)
@@ -1321,28 +1492,67 @@ class BattleSimulatorWindow(QMainWindow):
                 item = self.team_table.item(row, col)
                 entry["cells"][col] = item.text() if item else ""
             rows.append(entry)
+
+        data = {
+            "version": 3,
+            "rows": rows,
+            "enemy": {
+                "count": self.enemy_count_spin.value(),
+                "toughness": self.toughness_spin.value(),
+                "hp": self.enemy_hp_spin.value(),
+                "weakness": self.weakness_edit.toPlainText(),
+                "level": self.enemy_level_spin.value(),
+                "non_weak_resist": self.non_weak_resist_spin.value(),
+            },
+            "battle": {
+                "initial_sp": self.sp_spin.value(),
+                "max_av": self.turns_spin.value(),
+                "action_mode": self.action_combo.currentIndex(),
+            },
+            "skill_levels": {
+                "normal": self.skill_level_normal_spin.value(),
+                "skill": self.skill_level_skill_spin.value(),
+                "ultra": self.skill_level_ultra_spin.value(),
+                "talent": self.skill_level_talent_spin.value(),
+                "memo": self.skill_level_memo_spin.value(),
+                "elation": self.elation_skill_level_spin.value(),
+            },
+            "enemy_attacks": [asdict(a) for a in self._collect_enemy_attacks()],
+        }
         try:
-            TEAM_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            TEAM_CONFIG_PATH.write_text(
-                json.dumps({"version": 2, "rows": rows}, ensure_ascii=False, indent=1),
+            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            CONFIG_PATH.write_text(
+                json.dumps(data, ensure_ascii=False, indent=1),
                 encoding="utf-8",
             )
         except OSError:
             pass  # 缓存写入失败不影响使用
 
-    def _load_team_config(self) -> None:
-        """加载队伍配置缓存（存在且可解析时覆盖默认配置）。
+    def _load_config(self) -> None:
+        """加载缓存配置（存在且可解析时覆盖默认配置）。
 
-        旧版本（13 列，无光锥列）缓存自动迁移：属性列号 +1。
+        旧版本（13 列，无光锥列）队伍缓存自动迁移：属性列号 +1。
+        其余配置（怪物/战斗参数/技能等级）为尽力加载，损坏字段回退默认。
         """
-        if not TEAM_CONFIG_PATH.exists():
+        if not CONFIG_PATH.exists():
             return
         try:
-            data = json.loads(TEAM_CONFIG_PATH.read_text(encoding="utf-8"))
+            data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return
-        if isinstance(data, dict) and data.get("version") == 2:
-            rows = data.get("rows", [])
+        if not isinstance(data, dict):
+            return
+
+        def _int(value, default: int) -> int:
+            """安全转 int（缓存字段损坏时回退默认）。"""
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        # ── 队伍表格 ──────────────────────────────
+        if data.get("version") in (2, 3) and isinstance(data.get("rows"), list):
+            rows = data["rows"]
         else:
             # 旧格式（13 列）：属性列号整体 +1（插入光锥列）
             rows = data if isinstance(data, list) else []
@@ -1365,6 +1575,150 @@ class BattleSimulatorWindow(QMainWindow):
                 self.team_table.setItem(i, int(col), QTableWidgetItem(str(text)))
         self._update_element_bonus_tooltips()
         self._update_overview()
+
+        # ── 怪物配置 ──────────────────────────────
+        enemy = data.get("enemy")
+        if isinstance(enemy, dict):
+            self.enemy_count_spin.setValue(_int(enemy.get("count"), 1))
+            self.toughness_spin.setValue(_int(enemy.get("toughness"), 60))
+            self.enemy_hp_spin.setValue(_int(enemy.get("hp"), 100000))
+            weakness = enemy.get("weakness")
+            if isinstance(weakness, str):
+                self.weakness_edit.setPlainText(weakness)
+            self.enemy_level_spin.setValue(_int(enemy.get("level"), 80))
+            self.non_weak_resist_spin.setValue(_int(enemy.get("non_weak_resist"), 20))
+
+        # ── 战斗参数 ──────────────────────────────
+        battle = data.get("battle")
+        if isinstance(battle, dict):
+            self.sp_spin.setValue(_int(battle.get("initial_sp"), 3))
+            self.turns_spin.setValue(_int(battle.get("max_av"), 300))
+            mode = _int(battle.get("action_mode"), 0)
+            if 0 <= mode < self.action_combo.count():
+                self.action_combo.setCurrentIndex(mode)
+
+        # ── 技能等级 ──────────────────────────────
+        levels = data.get("skill_levels")
+        if isinstance(levels, dict):
+            self.skill_level_normal_spin.setValue(_int(levels.get("normal"), 1))
+            self.skill_level_skill_spin.setValue(_int(levels.get("skill"), 1))
+            self.skill_level_ultra_spin.setValue(_int(levels.get("ultra"), 1))
+            self.skill_level_talent_spin.setValue(_int(levels.get("talent"), 1))
+            self.skill_level_memo_spin.setValue(_int(levels.get("memo"), 1))
+            self.elation_skill_level_spin.setValue(_int(levels.get("elation"), 1))
+
+        # ── 敌方攻击配置 ──────────────────────────
+        attacks = data.get("enemy_attacks")
+        if isinstance(attacks, list):
+            self.enemy_attack_table.setRowCount(0)
+            for a in attacks:
+                if not isinstance(a, dict):
+                    continue
+                self._add_enemy_attack_row()
+                row = self.enemy_attack_table.rowCount() - 1
+                self.enemy_attack_table.item(row, 0).setText(str(a.get("total_av", 0)))
+                source_combo = self.enemy_attack_table.cellWidget(row, 1)
+                if isinstance(source_combo, QComboBox):
+                    source_combo.setCurrentIndex(max(0, min(4, _int(a.get("source_enemy_index"), 0))))
+                self.enemy_attack_table.item(row, 2).setText(str(a.get("attack", 0)))
+                target_widget = self.enemy_attack_table.cellWidget(row, 3)
+                target_indices = a.get("target_indices")
+                if (
+                    isinstance(target_widget, _EnemyAttackTargetButton)
+                    and isinstance(target_indices, list)
+                ):
+                    target_widget.set_target_indices(target_indices)
+                self.enemy_attack_table.item(row, 4).setText(str(a.get("energy_recover", 0)))
+
+    # ── 敌方攻击配置 ─────────────────────────────────
+
+    def _team_names(self) -> list[str]:
+        """返回队伍表 4 个槽位上的角色名（空槽位为空字符串）。"""
+        names: list[str] = []
+        for row in range(self.team_table.rowCount()):
+            item = self.team_table.item(row, COL_NAME)
+            names.append(item.text().strip() if item else "")
+        return names
+
+    def _refresh_enemy_attack_target_buttons(self, *_args) -> None:
+        """队伍名称变化后，刷新所有敌方攻击目标按钮的显示文本。"""
+        if not hasattr(self, "enemy_attack_table"):
+            return
+        for row in range(self.enemy_attack_table.rowCount()):
+            widget = self.enemy_attack_table.cellWidget(row, 3)
+            if isinstance(widget, _EnemyAttackTargetButton):
+                widget.refresh_text()
+
+    def _add_enemy_attack_row(self) -> None:
+        """添加一行敌方攻击配置。"""
+        row = self.enemy_attack_table.rowCount()
+        self.enemy_attack_table.insertRow(row)
+        self.enemy_attack_table.setItem(row, 0, QTableWidgetItem("0"))
+        # 释放来源（敌方目标）
+        source_combo = QComboBox()
+        source_combo.addItems([f"敌人{i + 1}" for i in range(5)])
+        source_combo.installEventFilter(_WheelBlocker(source_combo))
+        self.enemy_attack_table.setCellWidget(row, 1, source_combo)
+        self.enemy_attack_table.setItem(row, 2, QTableWidgetItem("0"))
+        # 目标角色：按钮 + 下拉多选菜单（显示当前队伍真实角色名）
+        target_button = _EnemyAttackTargetButton(self._team_names)
+        self.enemy_attack_table.setCellWidget(row, 3, target_button)
+        self.enemy_attack_table.setItem(row, 4, QTableWidgetItem("0"))
+
+    def _remove_enemy_attack_row(self) -> None:
+        """删除选中的敌方攻击行。"""
+        row = self.enemy_attack_table.currentRow()
+        if row >= 0:
+            self.enemy_attack_table.removeRow(row)
+
+    def _collect_enemy_attacks(self, *, for_simulator: bool = False) -> list[EnemyAttack]:
+        """从敌方攻击配置表收集攻击列表。
+
+        Args:
+            for_simulator: False 时保留队伍槽位下标（用于配置存档）；
+                           True 时转换为模拟器 characters 列表下标。
+        """
+        attacks: list[EnemyAttack] = []
+
+        def _num(item: QTableWidgetItem | None, default: float = 0.0) -> float:
+            try:
+                return float(item.text().strip()) if item and item.text().strip() else default
+            except ValueError:
+                return default
+
+        # UI 中目标按队伍槽位（0-3）选择；模拟器里的 target_indices 是
+        # 已配置角色列表的下标，因此运行时做一次槽位 → 角色下标映射。
+        slot_to_char_index: dict[int, int] = {}
+        if for_simulator:
+            configured_rows = [i for i, name in enumerate(self._team_names()) if name]
+            slot_to_char_index = {slot: idx for idx, slot in enumerate(configured_rows)}
+
+        for row in range(self.enemy_attack_table.rowCount()):
+            total_av = _num(self.enemy_attack_table.item(row, 0))
+            attack = _num(self.enemy_attack_table.item(row, 2))
+            energy = _num(self.enemy_attack_table.item(row, 4))
+            source_widget = self.enemy_attack_table.cellWidget(row, 1)
+            source_index = source_widget.currentIndex() if isinstance(source_widget, QComboBox) else 0
+            target_widget = self.enemy_attack_table.cellWidget(row, 3)
+            selected_slots = (
+                target_widget.target_indices()
+                if isinstance(target_widget, _EnemyAttackTargetButton)
+                else []
+            )
+            target_indices = (
+                [slot_to_char_index[slot] for slot in selected_slots
+                 if slot in slot_to_char_index]
+                if for_simulator
+                else selected_slots
+            )
+            attacks.append(EnemyAttack(
+                total_av=total_av,
+                source_enemy_index=max(0, min(4, source_index)),
+                attack=attack,
+                target_indices=target_indices,
+                energy_recover=energy,
+            ))
+        return attacks
 
     # ── 读取配置 ─────────────────────────────────────
 
@@ -1465,24 +1819,34 @@ class BattleSimulatorWindow(QMainWindow):
                 warnings.append(f"{name}：真实数据未就绪，使用预设技能")
             characters.append(char)
 
-        enemy_name = self.enemy_name_edit.toPlainText().strip() or "怪物"
+        enemy_name = "木桩"
+        enemy_count = self.enemy_count_spin.value()
         toughness = self.toughness_spin.value()
         weaknesses_zh = [
             w.strip() for w in self.weakness_edit.toPlainText().split(",") if w.strip()
         ]
         weaknesses = [ELEMENT_MAP_ZH_TO_EN.get(w, w) for w in weaknesses_zh]
         enemy_level = self.enemy_level_spin.value()
-        enemy = EnemyState(
-            unit_id="enemy1",
-            name=enemy_name,
-            max_toughness=toughness,
-            current_toughness=toughness,
-            weakness_elements=weaknesses,
-            level=enemy_level,
-        )
+        non_weak_resist = self.non_weak_resist_spin.value() / 100.0
+        # 弱点属性对所有怪物生效；弱点对应属性抗性 0，其余用非弱点抗性配置
+        resistance = build_enemy_resistance(weaknesses, non_weak_resist)
+        enemies = [
+            EnemyState(
+                unit_id=f"enemy{i + 1}",
+                name=enemy_name,
+                max_toughness=toughness,
+                current_toughness=toughness,
+                weakness_elements=weaknesses,
+                level=enemy_level,
+                speed=0.0,  # 木桩：速度 0，不进入行动队列（永不行动）
+                resistance=resistance,
+                max_hp=float(self.enemy_hp_spin.value()),
+            )
+            for i in range(enemy_count)
+        ]
 
         return (
-            characters, [enemy], self.sp_spin.value(), self.turns_spin.value(),
+            characters, enemies, self.sp_spin.value(), self.turns_spin.value(),
             self.action_combo.currentIndex(), warnings,
         )
 
@@ -1510,6 +1874,7 @@ class BattleSimulatorWindow(QMainWindow):
             enemies=enemies,
             max_av=float(max_av),
             initial_sp=initial_sp,
+            enemy_attacks=self._collect_enemy_attacks(for_simulator=True),
         )
         self._interactive_sim.setup()
         # 战斗开始（含秘技进战效果）后停在待推进阶段：按空格才轮到第一个行动者
@@ -1519,6 +1884,8 @@ class BattleSimulatorWindow(QMainWindow):
 
         # 重建能量图标
         self._rebuild_energy_orbs()
+        # 重建敌方目标选择按钮（默认选中第一个）
+        self._rebuild_enemy_targets()
 
         # 启用操作按钮
         self.btn_start_interactive.setText("↻ 重新开始")
@@ -1569,7 +1936,7 @@ class BattleSimulatorWindow(QMainWindow):
             QMessageBox.warning(self, "战技点不足", "当前 SP 为 0，无法使用战技")
             return
 
-        target_id = sim.enemies[0].unit_id if sim.enemies else ""
+        target_id = self._selected_target_id()
         action = PlayerAction(
             unit_id=char.unit_id,
             skill_type=skill_type,
@@ -1618,7 +1985,7 @@ class BattleSimulatorWindow(QMainWindow):
             return
         sim = self._interactive_sim
 
-        log = sim.execute_ultra(char_index)
+        log = sim.execute_ultra(char_index, target_id=self._selected_target_id())
         if log is None:
             QMessageBox.information(
                 self, "提示",
@@ -1668,7 +2035,14 @@ class BattleSimulatorWindow(QMainWindow):
 
         # 更新状态栏
         battle_ended = False
-        if sim.total_av >= sim.max_av:
+        if not sim.enemies:
+            status = (
+                f"战斗结束！  全部敌人已死亡  总AV: {sim.total_av:.1f}/{sim.max_av:.0f}  "
+                f"总伤害: {sim.total_damage:.0f}"
+            )
+            self._interactive_active = False
+            battle_ended = True
+        elif sim.total_av >= sim.max_av:
             status = (
                 f"战斗结束！  总AV: {sim.total_av:.1f}/{sim.max_av:.0f}  "
                 f"总伤害: {sim.total_damage:.0f}  阿哈时刻: {sim.aha_count}次"
@@ -1695,8 +2069,7 @@ class BattleSimulatorWindow(QMainWindow):
                 status = (
                     f"按空格推进到下个行动者，或按Q/E推进到下个行动者并自动尝试释放普攻/战技\n"
                     f"总AV: {sim.total_av:.1f}/{sim.max_av:.0f}"
-                    f"{laugh_info}\n"
-                    f"全队能量: {all_energy}"
+                    f"{laugh_info}"
                 )
             else:
                 if actor.is_monster:
@@ -1725,6 +2098,9 @@ class BattleSimulatorWindow(QMainWindow):
 
         # 更新角色能量图标
         self._update_energy_orbs()
+
+        # 刷新敌方目标按钮文字（击破标记）
+        self._update_enemy_targets_display()
 
         # 更新日志表格
         logs = sim.logs
@@ -1798,6 +2174,7 @@ class BattleSimulatorWindow(QMainWindow):
                 max_energy=char.base_stats.energy_max,
             )
             orb.set_energy(char.energy)
+            orb.set_hp(char.current_hp, char.final_stats().hp)
             # 加载角色头像（若有 nanoka 角色 ID）
             if char.char_id:
                 pix = _load_character_icon(char.char_id)
@@ -1806,6 +2183,140 @@ class BattleSimulatorWindow(QMainWindow):
             orb.clicked.connect(lambda idx=i: self._show_char_buffs(idx))
             self._energy_orbs.append(orb)
             self.energy_orbs_container.addWidget(orb)
+
+    # ── 敌方目标选择 ─────────────────────────────────
+
+    def _rebuild_enemy_targets(self) -> None:
+        """根据当前敌人数量重建敌方目标卡片（默认选中第一个）。"""
+        # 清空旧卡片与布局
+        while self.enemy_target_layout.count():
+            item = self.enemy_target_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._enemy_target_buttons.clear()
+
+        sim = self._interactive_sim
+        if not sim or not sim.enemies:
+            self._selected_enemy_id = ""
+            return
+
+        for enemy in sim.enemies:
+            card = EnemyTargetWidget(enemy.unit_id, enemy.name)
+            card.clicked.connect(self._on_enemy_target_clicked)
+            card.double_clicked.connect(self._on_enemy_target_double_clicked)
+            card.set_hp(enemy.current_hp, enemy.max_hp)
+            card.set_toughness(enemy.current_toughness, enemy.max_toughness, enemy.is_broken)
+            self._enemy_target_buttons.append(card)
+            self.enemy_target_layout.addWidget(card)
+
+        # 默认选中第一个
+        self._selected_enemy_id = sim.enemies[0].unit_id
+        self._enemy_target_buttons[0].set_checked(True)
+
+    def _on_enemy_target_clicked(self, unit_id: str) -> None:
+        """点击敌人卡片：切换选中。"""
+        self._selected_enemy_id = unit_id
+        for card in self._enemy_target_buttons:
+            card.set_checked(card.unit_id == unit_id)
+
+    def _on_enemy_target_double_clicked(self, unit_id: str) -> None:
+        """双击敌人卡片：弹出敌方目标当前 buff / 状态。"""
+        self._show_enemy_buffs(unit_id)
+
+    def _show_enemy_buffs(self, unit_id: str) -> None:
+        """显示敌方目标的当前 buff / 状态（减防、易伤、buff 列表）。"""
+        sim = self._interactive_sim
+        if not sim:
+            return
+        enemy = next((e for e in sim.enemies if e.unit_id == unit_id), None)
+        if enemy is None:
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"{enemy.name} 的 Buff")
+        dlg.resize(560, 420)
+        layout = QVBoxLayout(dlg)
+
+        # 基本状态
+        broken_zh = "是" if enemy.is_broken else "否"
+        state = QLabel(
+            f"生命 {enemy.current_hp:,.0f}/{enemy.max_hp:,.0f}"
+            f"   |   韧性 {enemy.current_toughness:.0f}/{enemy.max_toughness:.0f}"
+            f"   |   击破 {broken_zh}   |   等级 {enemy.level}"
+        )
+        state.setWordWrap(True)
+        state.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; font-weight: 600;")
+        layout.addWidget(state)
+
+        # buff / debuff 列表（名称 + 剩余回合右对齐 + 描述，逐条展示不合并数值）
+        parts: list[str] = []
+        for buff in enemy.buff_mgr.buffs:
+            left = f"<b>{buff.name}</b>"
+            if buff.max_stacks > 1 or buff.current_stacks > 1:
+                left += f"（{buff.current_stacks}/{buff.max_stacks}）"
+            turns = self._buff_turns_text(buff)
+            if turns:
+                head = (
+                    f'<table width="100%" cellspacing="0" cellpadding="0" border="0">'
+                    f"<tr><td>{left}</td>"
+                    f'<td align="right"><font color="{Colors.TEXT_SECONDARY}">{turns}</font></td>'
+                    f"</tr></table>"
+                )
+            else:
+                head = left
+            parts.append(f"{head}<br>{self._buff_desc(buff)}")
+        # 各角色模块施加在该敌人身上的 debuff（饲饵/煞火缠身/结界等，逐条展示）
+        for module in sim.char_modules.values():
+            for name, desc in module.enemy_buffs(sim, enemy):
+                parts.append(f"<b>{name}</b><br>{desc}")
+
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setFrameShape(QFrame.NoFrame)
+        text_edit.setStyleSheet(
+            f"background-color: {Colors.BG_PANEL}; color: {Colors.TEXT_PRIMARY};"
+            f" border: 1px solid {Colors.BORDER}; border-radius: 5px;"
+        )
+        text_edit.setHtml("<br><br>".join(parts) if parts else "无 buff")
+        layout.addWidget(text_edit, stretch=1)
+
+        close_btn = QPushButton("关闭")
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.clicked.connect(dlg.accept)
+        layout.addWidget(close_btn, alignment=Qt.AlignRight)
+        dlg.exec()
+
+    def _selected_target_id(self) -> str:
+        """返回当前选中的敌方目标 unit_id（无敌人返回空串）。
+
+        若选中的敌人已死亡离场，回退到第一个存活敌人。
+        """
+        sim = self._interactive_sim
+        if not sim or not sim.enemies:
+            return ""
+        if self._selected_enemy_id and any(
+            e.unit_id == self._selected_enemy_id for e in sim.enemies
+        ):
+            return self._selected_enemy_id
+        return sim.enemies[0].unit_id
+
+    def _update_enemy_targets_display(self) -> None:
+        """刷新敌方目标卡片（血条/韧性条/击破标记；敌人死亡则重建）。"""
+        sim = self._interactive_sim
+        if not sim:
+            return
+        card_ids = [c.unit_id for c in self._enemy_target_buttons]
+        sim_ids = [e.unit_id for e in sim.enemies]
+        if card_ids != sim_ids:
+            self._rebuild_enemy_targets()
+            return
+        for i, enemy in enumerate(sim.enemies):
+            if i >= len(self._enemy_target_buttons):
+                continue
+            card = self._enemy_target_buttons[i]
+            card.set_hp(enemy.current_hp, enemy.max_hp)
+            card.set_toughness(enemy.current_toughness, enemy.max_toughness, enemy.is_broken)
 
     def _update_energy_orbs(self) -> None:
         """更新所有能量图标的数值和状态。"""
@@ -1835,6 +2346,7 @@ class BattleSimulatorWindow(QMainWindow):
             char = sim.characters[i]
             orb.set_max_energy(char.base_stats.energy_max)
             orb.set_energy(char.energy)
+            orb.set_hp(char.current_hp, char.final_stats().hp)
             orb.set_active(char.unit_id == active_unit_id)
             orb.set_pending(char.unit_id == pending_unit_id)
             # 充能指示：圆点（不死途追击充能）/ 文字（千冶天赋充能 "6/9"）
@@ -1862,6 +2374,7 @@ class BattleSimulatorWindow(QMainWindow):
         "dmg_bonus": "伤害提高", "break_effect": "击破特攻提升",
         "effect_hit": "效果命中提升", "effect_res": "效果抵抗提升",
         "energy_regen": "能量恢复效率提升", "outgoing_heal": "治疗量加成提升",
+        "res_pen": "我方全体目标全属性抗性穿透提高",
         "hp_flat": "生命值提升", "atk_flat": "攻击力提升", "def_flat": "防御力提升",
         "spd_flat": "速度提升",
         "good_joke": "好活当赏", "laugh_point": "笑点",
@@ -1871,7 +2384,8 @@ class BattleSimulatorWindow(QMainWindow):
     _PCT_BUFF_STATS = {
         "hp_pct", "atk_pct", "def_pct", "spd_pct", "crit_rate", "crit_dmg",
         "dmg_bonus", "break_effect", "effect_hit", "effect_res",
-        "energy_regen", "outgoing_heal", "good_joke", "elation_dmg", "laugh_bonus",
+        "energy_regen", "outgoing_heal", "res_pen", "good_joke",
+        "elation_dmg", "laugh_bonus",
     }
 
     def _buff_desc(self, buff) -> str:
@@ -1884,25 +2398,43 @@ class BattleSimulatorWindow(QMainWindow):
         stat_zh = self._STAT_NAMES_ZH.get(buff.stat, buff.stat)
         return f"{stat_zh} {text}"
 
+    def _buff_turns_text(self, buff) -> str:
+        """回合制 buff 的剩余回合文本（非回合制时效返回空串）。"""
+        if buff.duration_type in (
+            BuffDuration.TURNS_SELF_START,
+            BuffDuration.TURNS_SELF_END,
+        ):
+            return f"剩余 {buff.duration_count} 回合"
+        return ""
+
     def _buffs_html(self, char: CharacterUnit, char_index: int) -> str:
-        """生成 buff 列表 HTML（名称加粗、层数括号、描述换行）。
+        """生成 buff 列表 HTML（名称加粗、剩余回合右对齐、描述换行）。
 
         包含：BuffManager buff、模块资源（婪酣等）、额外能力（行迹被动）。
         """
         parts: list[str] = []
 
-        def append(name: str, desc: str, stacks: str = "") -> None:
-            name_html = f"<b>{name}</b>"
+        def append(name: str, desc: str, stacks: str = "", turns: str = "") -> None:
+            left = f"<b>{name}</b>"
             if stacks:
-                name_html += f"（{stacks}）"
-            parts.append(f"{name_html}<br>{desc}")
+                left += f"（{stacks}）"
+            if turns:
+                head = (
+                    f'<table width="100%" cellspacing="0" cellpadding="0" border="0">'
+                    f"<tr><td>{left}</td>"
+                    f'<td align="right"><font color="{Colors.TEXT_SECONDARY}">{turns}</font></td>'
+                    f"</tr></table>"
+                )
+            else:
+                head = left
+            parts.append(f"{head}<br>{desc}")
 
         # Buff（来自 BuffManager）
         for buff in char.buff_mgr.buffs:
             stacks = ""
             if buff.max_stacks > 1 or buff.current_stacks > 1:
                 stacks = f"{buff.current_stacks}/{buff.max_stacks}"
-            append(buff.name, self._buff_desc(buff), stacks)
+            append(buff.name, self._buff_desc(buff), stacks, self._buff_turns_text(buff))
 
         # 模块资源（如不死途婪酣层数）
         module = self._interactive_sim.char_modules.get(char.unit_id)
@@ -2070,7 +2602,9 @@ class BattleSimulatorWindow(QMainWindow):
         sim = self._interactive_sim
 
         # 判断结束原因
-        if sim.total_av >= sim.max_av:
+        if not sim.enemies:
+            end_reason = BattleEndReason.ALL_ENEMIES_DEAD
+        elif sim.total_av >= sim.max_av:
             end_reason = BattleEndReason.MAX_AV
         elif not sim.action_queue.entries:
             end_reason = BattleEndReason.NO_ACTIONS
@@ -2218,6 +2752,7 @@ class BattleSimulatorWindow(QMainWindow):
             enemies=enemies,
             max_av=float(max_av),
             initial_sp=initial_sp,
+            enemy_attacks=self._collect_enemy_attacks(for_simulator=True),
         )
         sim.setup()
 
@@ -2422,9 +2957,9 @@ class BattleSimulatorWindow(QMainWindow):
     # ── 清理 ────────────────────────────────────────────
 
     def closeEvent(self, event) -> None:
-        """窗口关闭：保存队伍配置缓存 + 终止仍在运行的详情/光锥加载线程。"""
+        """窗口关闭：保存全部配置缓存 + 终止仍在运行的详情/光锥加载线程。"""
         if hasattr(self, "team_table"):
-            self._save_team_config()
+            self._save_config()
         threads = dict(getattr(self, "_detail_threads", {}))
         threads.update(getattr(self, "_lc_threads", {}))
         for thread in threads.values():

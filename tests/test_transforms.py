@@ -49,6 +49,11 @@ class TestTextCleaning:
     def test_interpolate_params_no_params_keeps_text(self):
         assert interpolate_params("无占位符", []) == "无占位符"
 
+    def test_interpolate_params_float_format(self):
+        """#N[f1] 浮点占位符保留 1 位小数。"""
+        assert interpolate_params("恢复#2[f1]点能量", [30, 1.5]) == "恢复1.5点能量"
+        assert interpolate_params("提高#1[f1]%", [0.24]) == "提高24.0%"
+
     def test_clean_text_combined(self):
         text = "<color=#fff>提高#1[i]%</color>"
         assert clean_text(text, [0.3]) == "提高30%"

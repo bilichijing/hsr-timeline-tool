@@ -29,12 +29,10 @@
 - 140307 秘技「开心你就拍拍手」：进战获得【神启】#1（3）回合
 
 未建模（TODO）：
-- 普攻相邻目标伤害（#2，需敌人位置模型）
-- 附加伤害目标"被攻击目标中当前生命值最高的目标"（无敌方 HP 模型，
-  暂取触发命中的目标；单敌场景一致）
 - 结界期间缇宝生命上限随我方 HP 变化动态重算（暂在结界开启时计算一次）
 - 天赋追击前目标被消灭则对新入场敌人发动（无敌人死亡模型）
 - 终结技/天赋追击的削韧（show_stance_list 第二项语义待勘探）
+- 普攻相邻目标的削韧（暂 0，待勘探）
 """
 
 from __future__ import annotations
@@ -100,6 +98,12 @@ class TribbieModule(CharacterModule):
     _extra_tokens: set[int] = set()
     # 已处理 A4 回能的行动令牌集合（同上，我方其他目标攻击按行动回能）
     _a4_tokens: set[int] = set()
+    # 各行动被攻击的目标集合（延迟结算附加伤害用）：{action_token: [enemy_unit_id]}
+    _action_targets: dict[int, list[str]] = {}
+    # 各行动的日志（附加伤害并入对应行动的日志）：{action_token: ActionLog}
+    _action_logs: dict[int, "ActionLog"] = {}
+    # 各行动命中时的属性快照（附加伤害用命中时面板，避免吃到行动中段新增的 A6 等 buff）
+    _action_stats: dict[int, "FinalStats"] = {}
     # 行迹参数（on_battle_start 从 skill_trees 读取）
     a2_hp_ratio: float = TRACE_A2_HP_RATIO
     a4_start_energy: float = TRACE_A4_START_ENERGY
@@ -117,6 +121,9 @@ class TribbieModule(CharacterModule):
         self.ultra_ready = {}
         self._extra_tokens = set()
         self._a4_tokens = set()
+        self._action_targets = {}
+        self._action_logs = {}
+        self._action_stats = {}
         # 读取行迹额外能力参数
         self._read_trace_params(char)
         # 【岔路旁的小石子】：战斗开始恢复 30 点能量（走能量恢复效率乘区）
@@ -154,7 +161,7 @@ class TribbieModule(CharacterModule):
     ) -> None:
         skill_id = str(skill.id)
         if skill_id == SKILL_NORMAL:
-            # 普攻：生命上限倍率伤害（#1；相邻目标 #2 未建模 TODO）
+            # 普攻：主目标生命上限倍率伤害（#1；相邻目标 #2 在 on_skill_end 结算）
             if skill.effects:
                 skill.effects[0].base_stat = "hp"
         elif skill_id == SKILL_SKILL:
@@ -166,10 +173,10 @@ class TribbieModule(CharacterModule):
                 ratio=module_params(skill, 1, 0.12),
             )
         elif skill_id == SKILL_ULTRA:
-            # 终结技：生命上限倍率伤害（#1）+ 开启结界（易伤影响本体伤害，
-            # 故在伤害结算前 on_skill_cast 开启，本体伤害吃到易伤）
-            if skill.effects:
-                skill.effects[0].base_stat = "hp"
+            # 终结技：全体生命上限伤害（#1，多敌人）+ 开启结界（易伤影响本体伤害，
+            # 故在伤害结算前 on_skill_cast 开启，本体伤害吃到易伤）。
+            # 清空 effects，避免 _resolve_skill 单目标误结算；伤害延迟到 on_skill_end。
+            skill.effects = []
             self._open_field(sim, char, skill)
 
     def on_attack_hit(
@@ -185,20 +192,23 @@ class TribbieModule(CharacterModule):
     ) -> None:
         """结界附加伤害 + A4 行迹回能（均按行动计，一次行动只触发一次）。
 
-        附加伤害以 is_attack=False 打出（不进 on_attack_hit 分发），
-        无递归问题；此处只需按行动令牌去重。
+        附加伤害延迟到行动结束结算（on_post_skill），以便从"本次行动被攻击
+        的所有目标"中选取生命值最高者；附加伤害以 is_attack=False 打出
+        （不进 on_attack_hit 分发），无递归问题。
         """
         char = next((c for c in sim.characters if c.unit_id == self.unit_id), None)
         if char is None:
             return
 
-        # 结界期间：我方目标攻击（含缇宝自己，按行动）后触发附加伤害。
-        # 附加伤害并入触发它的那次行动（log 为触发攻击的日志，不单独成行动）；
-        # 附加伤害不是"攻击"（is_attack=False，不进 on_attack_hit 分发），
-        # 因此不会递归触发自身，也不会触发不死途天赋等"攻击后"系效果
-        if self.field_turns > 0 and action_token not in self._extra_tokens:
-            self._extra_tokens.add(action_token)
-            self._extra_damage(sim, char, target, log)
+        # 结界期间：记录被攻击目标（延迟到 on_post_skill 结算附加伤害）。
+        # 附加伤害并入触发它的那次行动（log 为触发攻击的日志，不单独成行动）
+        if self.field_turns > 0:
+            self._action_targets.setdefault(action_token, []).append(target.unit_id)
+            if action_token not in self._extra_tokens:
+                self._extra_tokens.add(action_token)
+                self._action_logs[action_token] = log
+                # 快照命中时的面板：附加伤害按命中时属性计算（不吃行动中段新增的 buff）
+                self._action_stats[action_token] = char.final_stats()
 
         # 【岔路旁的小石子】：我方其他目标攻击（按行动，缇宝自己不算）回能
         if attacker.unit_id != self.unit_id and action_token not in self._a4_tokens:
@@ -215,10 +225,15 @@ class TribbieModule(CharacterModule):
         target: EnemyState | None,
         log: ActionLog,
     ) -> None:
-        """终结技结算后：队友终结技 → 天赋追击；缇宝终结技 → 重置触发次数。"""
+        """技能结算后：普攻相邻伤害 / 终结技全体伤害 / 队友终结技天赋追击。"""
+        if skill.skill_type == SkillType.NORMAL:
+            self._normal_adjacent(sim, char, skill, target, log)
+            return
         if skill.skill_type != SkillType.ULTRA:
             return
         if char.unit_id == self.unit_id:
+            # 缇宝自身终结技：全体 #1 伤害（on_skill_cast 已清空 effects）
+            self._ultra_aoe(sim, char, skill, log)
             # 缇宝施放终结技：重置我方其他角色可触发次数
             self.ultra_ready = {}
             return
@@ -226,6 +241,54 @@ class TribbieModule(CharacterModule):
         if self.ultra_ready.get(char.unit_id, True):
             self.ultra_ready[char.unit_id] = False
             self._ultra_follow_up(sim, char)
+
+    def on_post_skill(
+        self,
+        sim: BattleSimulator,
+        char: CharacterUnit,
+        skill: Skill,
+        action: PlayerAction,
+        target: EnemyState | None,
+        log: ActionLog,
+    ) -> None:
+        """技能（含追击链）完全结算后：结算结界附加伤害。"""
+        self._flush_added_damage(sim)
+
+    def _flush_added_damage(self, sim: BattleSimulator) -> None:
+        """结算所有待处理的结界附加伤害（取被攻击目标中生命值最高者）。"""
+        if not self._action_targets:
+            return
+        char = next((c for c in sim.characters if c.unit_id == self.unit_id), None)
+        if char is None:
+            self._action_targets.clear()
+            self._action_logs.clear()
+            self._action_stats.clear()
+            return
+        for token, unit_ids in list(self._action_targets.items()):
+            # 被攻击且仍在场的敌人（已死亡离场者不参与选取）
+            targets = [e for e in sim.enemies if e.unit_id in unit_ids]
+            if not targets:
+                continue
+            highest = max(targets, key=lambda e: e.current_hp)
+            self._extra_damage(
+                sim, char, highest,
+                self._action_logs.get(token),
+                self._action_stats.get(token),
+            )
+        self._action_targets.clear()
+        self._action_logs.clear()
+        self._action_stats.clear()
+
+    def enemy_buffs(
+        self,
+        sim: BattleSimulator,
+        enemy: EnemyState,
+    ) -> list[tuple[str, str]]:
+        """结界 debuff：结界展开期间对所有敌人显示受伤提高。"""
+        if self.field_turns <= 0 or self.vuln_contribution <= 0:
+            return []
+        desc = f"敌方目标受到的伤害提高 {self.vuln_contribution * 100:.1f}%"
+        return [("结界", desc)]
 
     # ── 私有辅助 ─────────────────────────────────────────
 
@@ -310,14 +373,87 @@ class TribbieModule(CharacterModule):
         for enemy in sim.enemies:
             enemy.vulnerability += diff
 
+    def _normal_adjacent(
+        self,
+        sim: BattleSimulator,
+        char: CharacterUnit,
+        skill: Skill,
+        target: EnemyState | None,
+        log: ActionLog,
+    ) -> None:
+        """普攻「一百层的小火箭」#2 相邻目标伤害（主目标左右各一名）。
+
+        按 enemy1..enemyN 排列，取主目标左右相邻敌人（2 名以上敌人时生效）；
+        相邻伤害与主目标同属一次行动（用冻结令牌按行动去重）。
+        """
+        mult = module_params(skill, 2, 0.0)
+        if mult <= 0 or target is None or not sim.enemies:
+            return
+        idx = next(
+            (i for i, e in enumerate(sim.enemies) if e.unit_id == target.unit_id), None
+        )
+        if idx is None:
+            return
+        adjacent: list[EnemyState] = []
+        if idx - 1 >= 0:
+            adjacent.append(sim.enemies[idx - 1])
+        if idx + 1 < len(sim.enemies):
+            adjacent.append(sim.enemies[idx + 1])
+        effect = SkillEffect(
+            damage_type=DamageType.NORMAL,
+            multiplier=mult,
+            base_stat="hp",
+            toughness_damage=0,  # TODO: 相邻目标削韧待勘探
+            element=ELEMENT,
+        )
+        for enemy in adjacent:
+            sim.deal_damage(
+                char, enemy, effect,
+                skill_type=SkillType.NORMAL, log=log,
+                action_token=sim.frozen_action_token,
+            )
+
+    def _ultra_aoe(
+        self,
+        sim: BattleSimulator,
+        char: CharacterUnit,
+        skill: Skill,
+        log: ActionLog,
+    ) -> None:
+        """终结技「猜猜这里住着谁」#1 全体生命上限量子伤害（每个敌人独立承受）。"""
+        if not sim.enemies:
+            return
+        mult = module_params(skill, 1, 0.0)
+        effect = SkillEffect(
+            damage_type=DamageType.NORMAL,
+            multiplier=mult,
+            base_stat="hp",
+            toughness_damage=self._skill_toughness(skill),
+            element=ELEMENT,
+        )
+        for enemy in sim.enemies:
+            sim.deal_damage(
+                char, enemy, effect,
+                skill_type=SkillType.ULTRA, log=log,
+                action_token=sim.frozen_action_token,
+            )
+
+    def _skill_toughness(self, skill: Skill) -> float:
+        """技能主削韧（show_stance_list[0]；缺失为 0）。"""
+        stance = skill.raw.get("show_stance_list") or []
+        if stance:
+            return float(stance[0])
+        return 0.0
+
     def _extra_damage(
         self,
         sim: BattleSimulator,
         char: CharacterUnit,
         target: EnemyState,
         log: ActionLog | None,
+        stats: "FinalStats | None" = None,
     ) -> None:
-        """结界附加伤害：对被攻击目标造成 #3 生命上限量子附加伤害。
+        """结界附加伤害：对目标造成 #3 生命上限量子附加伤害。
 
         - 攻击类型为【附加伤害】（SkillType.ADDED），不属于普攻/战技/
           终结技/追加攻击中的任何一种；伤害来源为缇宝。
@@ -326,8 +462,8 @@ class TribbieModule(CharacterModule):
         - 不是"攻击"（is_attack=False）：不触发 on_attack_hit 钩子与
           NEXT_ATTACK buff tick，"攻击后"系效果（不死途天赋、千冶充能等）
           不受附加伤害影响；自身也不会递归触发。
-        - 目标简化：文本为"被攻击目标中当前生命值最高的目标"
-          （无敌方 HP 模型，暂取触发命中的目标，单敌场景一致；多敌 TODO）。
+        - target 由调用方选定（_flush_added_damage 取被攻击目标中生命最高者）。
+        - stats 为命中时的属性快照（避免延迟结算吃到行动中段新增的 buff）。
         """
         ultra = char.skills.get(SKILL_ULTRA)
         mult = module_params(ultra, 3, 0.0)
@@ -340,7 +476,10 @@ class TribbieModule(CharacterModule):
             toughness_damage=0,  # TODO: 附加伤害削韧待勘探
             element=ELEMENT,
         )
-        sim.deal_damage(char, target, effect, skill_type=SkillType.ADDED, log=log, is_attack=False)
+        sim.deal_damage(
+            char, target, effect,
+            skill_type=SkillType.ADDED, log=log, is_attack=False, stats=stats,
+        )
 
     def _ultra_follow_up(self, sim: BattleSimulator, ult_char: CharacterUnit) -> None:
         """天赋【好忙好忙的缇宝】：其他角色施放终结技后，缇宝对敌方全体

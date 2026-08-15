@@ -23,7 +23,6 @@
 
 未建模（TODO，因模拟器暂无敌人 HP/死亡模型）：
 - 终结技强化追击"致命攻击转移"（击杀饲饵后转移到新饲饵继续打）
-- 战技"当前生命最低的敌方单体"选取（暂用 enemies[0] 占位）
 """
 
 from __future__ import annotations
@@ -67,9 +66,11 @@ class AshveilModule(CharacterModule):
     # 本模块对敌方 def_reduce 的贡献值（增量式累加/撤销，
     # 与千冶【煞火缠身】等其余模块的减防贡献共存）
     def_reduce_contribution: float = 0.0
-    # 最近已处理天赋的受击行动令牌（按行动计：一次攻击行动的多段命中
-    # 只触发一次"固定回 8 能量 + 追击判定"，避免战技 5 段回 5 次）
-    _last_proc_token: int | None = None
+    # 已处理天赋的受击行动令牌集合（按行动计：一次攻击行动的多段命中
+    # 只触发一次"固定回 8 能量 + 追击判定"，避免战技 5 段回 5 次）。
+    # 用集合而非单值：连锁触发（追击/追加战技 begin_new_action）后令牌
+    # 交替（T/T+1/T+2），单值无法去重"较早令牌"的后续命中（同千冶）。
+    _proc_tokens: set[int] = set()
 
     # ── 事件钩子 ─────────────────────────────────────────
 
@@ -79,10 +80,11 @@ class AshveilModule(CharacterModule):
         self.charge = module_params(talent, 1, 2)  # 初始充能 #1
         self.bait_unit_id = ""
         self.greed = 0
-        self._last_proc_token = None
-        # 战斗开始：场上首个敌人直接成为饲饵（当前默认单敌；多敌时 TODO 生命最低）
-        if sim.enemies:
-            self._set_bait(sim, char, sim.enemies[0])
+        self._proc_tokens = set()
+        # 战斗开始：当前场上生命值最低的敌方单体成为饲饵
+        lowest = self._lowest_hp_enemy(sim)
+        if lowest is not None:
+            self._set_bait(sim, char, lowest)
         # 秘技进战效果：对敌方全体造成攻击力 #2 倍率雷伤，并获 #3 点充能
         self._technique_on_battle_start(sim, char)
 
@@ -127,10 +129,10 @@ class AshveilModule(CharacterModule):
         # 防自激：不死途自己的攻击不触发（含其追加攻击自身，避免链式递归）
         if attacker.unit_id == self.unit_id:
             return
-        # 行动级去重：战技 5 段命中只算一次"受到攻击"
-        if action_token == self._last_proc_token:
+        # 行动级去重：战技 5 段命中只算一次"受到攻击"（用集合，乱序令牌也能正确去重）
+        if action_token in self._proc_tokens:
             return
-        self._last_proc_token = action_token
+        self._proc_tokens.add(action_token)
         char = next((c for c in sim.characters if c.unit_id == self.unit_id), None)
         if char is None:
             return
@@ -175,6 +177,38 @@ class AshveilModule(CharacterModule):
             self._follow_up_attack(sim, char, target, mult, notes="婪酣追击", energy_recover=0)
         # TODO: 致命攻击转移未建模（需敌人 HP/死亡模型）：
         #   追击击杀饲饵后应转移到新饲饵继续打，直至婪酣 < #3 层。
+
+    def on_enemy_dead(self, sim: BattleSimulator, enemy: EnemyState) -> None:
+        """饲饵死亡：转移到当前生命值最低的存活敌人（无存活则清除饲饵与减防）。"""
+        if enemy.unit_id != self.bait_unit_id:
+            return
+        char = next((c for c in sim.characters if c.unit_id == self.unit_id), None)
+        if char is None:
+            return
+        self.bait_unit_id = ""
+        lowest = self._lowest_hp_enemy(sim)
+        if lowest is not None:
+            self._set_bait(sim, char, lowest)
+        else:
+            self._update_def_reduce(sim, char)
+
+    def enemy_buffs(
+        self,
+        sim: BattleSimulator,
+        enemy: EnemyState,
+    ) -> list[tuple[str, str]]:
+        """饲饵 debuff：减防对所有敌人生效，饲饵标记仅当前饲饵目标显示。"""
+        items: list[tuple[str, str]] = []
+        # 场上存在饲饵时，敌方全体减防（对所有敌人生效）
+        if self.bait_unit_id and self.def_reduce_contribution:
+            items.append((
+                "饲饵·防御降低",
+                f"敌方全体防御降低 {self.def_reduce_contribution * 100:.1f}%",
+            ))
+        # 仅当前饲饵目标显示标记
+        if enemy.unit_id == self.bait_unit_id:
+            items.append(("饲饵", "当前为不死途的饲饵目标"))
+        return items
 
     # ── 私有辅助 ─────────────────────────────────────────
 
@@ -232,9 +266,10 @@ class AshveilModule(CharacterModule):
                 sim.sp.recover(sp_refund)
                 log.sp_after = sim.sp.current
         elif not self.bait_unit_id:
-            # 场上无饲饵：使目标成为饲饵
-            # TODO: 描述为"当前场上生命值最低的敌方单体"，无 HP 模型暂用施法目标占位
-            self._set_bait(sim, char, target)
+            # 场上无饲饵：立即使当前场上生命值最低的敌方单体成为饲饵
+            lowest = self._lowest_hp_enemy(sim)
+            if lowest is not None:
+                self._set_bait(sim, char, lowest)
         # 已有饲饵且目标不同：战技仍使目标成为新饲饵（仅最新目标生效）
         else:
             self._set_bait(sim, char, target)
@@ -294,6 +329,12 @@ class AshveilModule(CharacterModule):
             if enemy.unit_id == self.bait_unit_id:
                 return enemy
         return None
+
+    def _lowest_hp_enemy(self, sim: BattleSimulator) -> EnemyState | None:
+        """当前场上生命值最低的敌方单体（无敌人返回 None）。"""
+        if not sim.enemies:
+            return None
+        return min(sim.enemies, key=lambda e: e.current_hp)
 
     def _follow_up_attack(
         self,

@@ -82,7 +82,6 @@ class MortenaxModule(CharacterModule):
 
     # ── 状态（纯数据，deepcopy 安全）──────────────────────
     unit_id: str = ""            # 所属角色单位 ID（on_battle_start 时记录）
-    current_hp: float = 0.0      # 当前生命值（战斗开始 = 面板生命上限）
     rage: bool = False           # 无量忿怒（结界）状态
     charge: float = 0.0          # 天赋充能（0-9，结界期间攻击累计）
     countdown_unit_id: str = ""  # 无量忿怒倒计时单位 ID（行动时结界解除）
@@ -99,8 +98,6 @@ class MortenaxModule(CharacterModule):
 
     def on_battle_start(self, sim: BattleSimulator, char: CharacterUnit) -> None:
         self.unit_id = char.unit_id
-        # 最小 HP 模型：战斗开始满血（面板生命上限）
-        self.current_hp = char.final_stats().hp
         self.rage = False
         self.charge = 0.0
         self.countdown_unit_id = ""
@@ -148,14 +145,18 @@ class MortenaxModule(CharacterModule):
         skill_id = str(skill.id)
         if skill_id == SKILL_ULTRA_OPEN:
             self._on_ultra_open(sim, char, skill, log)
-        elif skill_id in (SKILL_NORMAL, SKILL_SKILL, SKILL_NORMAL_ENH, SKILL_ULTRA_ENH):
-            # 生命倍率伤害：修正 parse 默认的攻击力基础属性
+        elif skill_id in (SKILL_NORMAL, SKILL_NORMAL_ENH):
+            # 单体生命倍率：修正 parse 默认的攻击力基础属性
             if skill.effects:
                 skill.effects[0].base_stat = "hp"
-            if skill_id == SKILL_SKILL:
-                # 战技消耗生命（#4，不足降至 1）
-                self._consume_hp(char, module_params(skill, 4, 0.1))
-                # 额外段在 on_skill_end 打出（主日志入列后，保证日志顺序）
+        elif skill_id == SKILL_SKILL:
+            # 战技：全体主伤害 + 随机单体额外段（多敌人），延迟到 on_skill_end 结算
+            # （清空 effects，避免 _resolve_skill 单目标误结算主伤害）
+            skill.effects = []
+            self._consume_hp(char, module_params(skill, 4, 0.1))
+        elif skill_id == SKILL_ULTRA_ENH:
+            # 强化终结技：全体生命上限伤害（多敌人），延迟到 on_skill_end 结算
+            skill.effects = []
 
     def on_attack_hit(
         self,
@@ -170,25 +171,25 @@ class MortenaxModule(CharacterModule):
     ) -> None:
         """天赋：结界期间我方每次攻击（按行动计，含自身）后触发。
 
-        按行动令牌去重：一次行动（含终结技后的追击链、技能多段伤害）
-        的多次命中只计 1 点充能；模块主动开启的新行动（begin_new_action）
-        独立计数（如千冶天赋额外施放的战技）。
+        - 【煞火缠身】：每个命中的目标都施加/刷新（全体攻击命中谁就给谁上）。
+        - 充能按行动计：一次行动（含终结技后的追击链、技能多段/多目标伤害）
+          只计 1 点充能；模块主动开启的新行动（begin_new_action）独立计数
+          （如千冶天赋额外施放的战技）。
         注意：用分发时冻结的 action_token（非 sim.action_token）——
         分发循环内其他模块 begin_new_action 会修改全局令牌，导致本体命中
         被误判为与追击同一行动。
         """
         if not self.rage:
             return
-        token = action_token
-        if token in self._charged_tokens:
-            return
-        self._charged_tokens.add(token)
-
         char = next((c for c in sim.characters if c.unit_id == self.unit_id), None)
         if char is None:
             return
-        # 目标陷入【煞火缠身】
+        # 每个命中目标都陷入【煞火缠身】（全体攻击逐目标施加/刷新）
         self._apply_blaze(sim, char, target)
+        # 充能按行动计（一次行动只计 1 点）
+        if action_token in self._charged_tokens:
+            return
+        self._charged_tokens.add(action_token)
         # 充能 +1（封顶需求值；无法施放战技时保留）
         talent = get_skill_by_type(char.skills, SkillType.TALENT)
         need = int(module_params(talent, 1, 9))
@@ -204,14 +205,16 @@ class MortenaxModule(CharacterModule):
         target: EnemyState | None,
         log: ActionLog,
     ) -> None:
-        """技能结算后：战技额外 #2 次随机单体伤害（#3 倍率）。
+        """技能结算后：战技（全体+随机）与强化终结技（全体）的伤害。
 
         放在 on_skill_end（主日志已入列、首段伤害已结算）而非 on_skill_cast，
         保证日志顺序与连锁顺序正确：战技 → 追击 → 追加战技。
         """
-        if str(skill.id) != SKILL_SKILL:
-            return
-        self._on_skill_extra_hits(sim, char, skill, log)
+        skill_id = str(skill.id)
+        if skill_id == SKILL_SKILL:
+            self._deal_skill_skill(sim, char, skill, log)
+        elif skill_id == SKILL_ULTRA_ENH:
+            self._deal_ultra_enh(sim, char, skill, log)
 
     def on_countdown(self, sim: BattleSimulator, char: CharacterUnit, log: ActionLog) -> None:
         """倒计时回合开始：结界解除、退出无量忿怒。"""
@@ -235,13 +238,32 @@ class MortenaxModule(CharacterModule):
         else:
             self.blaze[enemy.unit_id] = (turns_left, def_part, vuln_part)
 
+    def on_enemy_dead(self, sim: BattleSimulator, enemy: EnemyState) -> None:
+        """煞火缠身目标死亡：移除其状态记录（敌对象已离场，无需撤销贡献）。"""
+        self.blaze.pop(enemy.unit_id, None)
+
+    def enemy_buffs(
+        self,
+        sim: BattleSimulator,
+        enemy: EnemyState,
+    ) -> list[tuple[str, str]]:
+        """煞火缠身 debuff：仅身中该 debuff 的敌人显示。"""
+        if enemy.unit_id not in self.blaze:
+            return []
+        turns_left, def_part, vuln_part = self.blaze[enemy.unit_id]
+        desc = (
+            f"防御降低 {def_part * 100:.1f}%、易伤 {vuln_part * 100:.1f}%，"
+            f"剩余 {turns_left:.0f} 个敌方回合"
+        )
+        return [("煞火缠身", desc)]
+
     # ── 私有辅助 ─────────────────────────────────────────
 
     def skill_deny_reason(self, sim: BattleSimulator, char: CharacterUnit) -> str | None:
         """战技被拒绝的原因（None=可施放）。UI 弹窗提示用。"""
         if not self.rage:
             return "未开启结界，无法施放战技"
-        if self.current_hp <= 1:
+        if char.current_hp <= 1:
             return "当前生命值 ≤1，无法施放战技"
         return None
 
@@ -271,12 +293,12 @@ class MortenaxModule(CharacterModule):
 
     def _can_cast_skill(self, char: CharacterUnit) -> bool:
         """战技可施放：处于无量忿怒且当前生命 >1。"""
-        return self.rage and self.current_hp > 1
+        return self.rage and char.current_hp > 1
 
     def _consume_hp(self, char: CharacterUnit, pct: float) -> None:
         """消耗生命上限 pct 的生命（不足时降至 1 点）。"""
         cost = char.final_stats().hp * pct
-        self.current_hp = max(1.0, self.current_hp - cost)
+        char.current_hp = max(1.0, char.current_hp - cost)
 
     def _on_ultra_open(
         self,
@@ -329,32 +351,90 @@ class MortenaxModule(CharacterModule):
         )
         log.notes = (log.notes + " 结界展开" if log.notes else "结界展开")
 
-    def _on_skill_extra_hits(
+    def _deal_skill_skill(
         self,
         sim: BattleSimulator,
         char: CharacterUnit,
         skill: Skill,
         log: ActionLog,
     ) -> None:
-        """战技额外 #2 次随机单体伤害（#3 倍率）。
+        """战技「刃下，归葬」：全体主伤害（#1）+ 随机单体额外段（#2 次 × #3 倍率）。
 
-        单敌场景全打同一目标；多敌随机选取待多目标模型（TODO）。
+        全体主伤害每个敌人独立承受完整倍率 + 完整削韧；随机段用固定种子
+        真随机（sim.random_enemy）选取目标，结果可复现。所有命中同属本次
+        行动（用冻结令牌），按"行动"粒度去重。
         """
         if not sim.enemies:
             return
-        target = sim.enemies[0]
+        token = sim.frozen_action_token
+        # 全体主伤害
+        main_mult = module_params(skill, 1, 0.0)
+        main_toughness = self._skill_toughness(skill)
+        for enemy in sim.enemies:
+            self._deal_hit(
+                sim, char, enemy, main_mult, main_toughness,
+                SkillType.SKILL, log, token,
+            )
+        # 随机单体额外段（真随机，固定种子可复现；单敌场景全部命中同一目标）
         for _ in range(int(module_params(skill, 2, 4))):
             mult = module_params(skill, 3, 0.0)
             if mult <= 0:
                 continue
-            effect = SkillEffect(
-                damage_type=DamageType.NORMAL,
-                multiplier=mult,
-                base_stat="hp",
-                toughness_damage=0,  # TODO: 额外段削韧待勘探
-                element=ELEMENT,
+            self._deal_hit(
+                sim, char, sim.random_enemy(), mult, 0.0,
+                SkillType.SKILL, log, token,
             )
-            sim.deal_damage(char, target, effect, skill_type=SkillType.SKILL, log=log)
+
+    def _deal_ultra_enh(
+        self,
+        sim: BattleSimulator,
+        char: CharacterUnit,
+        skill: Skill,
+        log: ActionLog,
+    ) -> None:
+        """强化终结技「千冶铸一，万劫烬灭」：全体生命上限伤害（#1）。"""
+        if not sim.enemies:
+            return
+        mult = module_params(skill, 1, 0.0)
+        toughness = self._skill_toughness(skill)
+        for enemy in sim.enemies:
+            self._deal_hit(
+                sim, char, enemy, mult, toughness,
+                SkillType.ULTRA, log, sim.frozen_action_token,
+            )
+
+    def _deal_hit(
+        self,
+        sim: BattleSimulator,
+        char: CharacterUnit,
+        target: EnemyState | None,
+        multiplier: float,
+        toughness: float,
+        skill_type: SkillType,
+        log: ActionLog,
+        action_token: int,
+    ) -> None:
+        """打一段生命上限倍率伤害（target 为 None 时跳过）。"""
+        if target is None or multiplier <= 0:
+            return
+        effect = SkillEffect(
+            damage_type=DamageType.NORMAL,
+            multiplier=multiplier,
+            base_stat="hp",
+            toughness_damage=toughness,
+            element=ELEMENT,
+        )
+        sim.deal_damage(
+            char, target, effect,
+            skill_type=skill_type, log=log, action_token=action_token,
+        )
+
+    def _skill_toughness(self, skill: Skill) -> float:
+        """技能主削韧（show_stance_list[0]；缺失为 0）。"""
+        stance = skill.raw.get("show_stance_list") or []
+        if stance:
+            return float(stance[0])
+        return 0.0
 
     def _apply_blaze(self, sim: BattleSimulator, char: CharacterUnit, enemy: EnemyState) -> None:
         """施加/刷新【煞火缠身】（终结技 #7/#4/#8 参数；同目标刷新剩余回合）。"""
@@ -407,14 +487,21 @@ class MortenaxModule(CharacterModule):
         # 消耗生命（战技 #4，不足降至 1）
         self._consume_hp(char, module_params(skill, 4, 0.1))
 
-        target = sim.enemies[0]
-        log = sim.make_follow_up_log(char, target, notes="因果尽偿·追加战技")
+        log = sim.make_follow_up_log(char, sim.enemies[0], notes="因果尽偿·追加战技")
+        # 本次独立行动的所有命中共享同一令牌
+        token = sim.action_token
 
         # 全体首段（#1 倍率 + 首段削韧）
-        self._follow_up_deal(sim, char, target, module_params(skill, 1, 0.0), 15, log)
-        # 额外 #2 次随机单体（#3 倍率；单敌场景全打同一目标，TODO 多敌随机）
+        main_toughness = self._skill_toughness(skill)
+        for enemy in sim.enemies:
+            self._follow_up_deal(
+                sim, char, enemy, module_params(skill, 1, 0.0), main_toughness, log, token,
+            )
+        # 额外 #2 次随机单体（#3 倍率；真随机固定种子）
         for _ in range(int(module_params(skill, 2, 4))):
-            self._follow_up_deal(sim, char, target, module_params(skill, 3, 0.0), 0, log)
+            self._follow_up_deal(
+                sim, char, sim.random_enemy(), module_params(skill, 3, 0.0), 0, log, token,
+            )
         # 战技回能（sp_base=30；"视为追加攻击"仅改伤害类型，回能按战技）
         sim.recover_energy(char, skill.energy_recover)
         # 同步日志快照
@@ -425,17 +512,18 @@ class MortenaxModule(CharacterModule):
         self,
         sim: BattleSimulator,
         char: CharacterUnit,
-        target: EnemyState,
+        target: EnemyState | None,
         multiplier: float,
         toughness: float,
         log: ActionLog,
+        action_token: int,
     ) -> None:
         """打一段伤害（技能类型=追加攻击，同时标记为战技，共享 log）。
 
         天赋触发的战技"本次战技视为追加攻击"：伤害记录同时标注
         FOLLOW_UP（主）与 SKILL（secondary），统计/buff 判定时可两者兼顾。
         """
-        if multiplier <= 0:
+        if target is None or multiplier <= 0:
             return
         effect = SkillEffect(
             damage_type=DamageType.NORMAL,
@@ -449,4 +537,5 @@ class MortenaxModule(CharacterModule):
             skill_type=SkillType.FOLLOW_UP,
             secondary_skill_type=SkillType.SKILL,
             log=log,
+            action_token=action_token,
         )

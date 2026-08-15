@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import copy
+import random
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
@@ -62,11 +63,20 @@ class EnemyState:
     resistance: dict[str, float] = field(default_factory=dict)  # {属性: 抗性}
     def_reduce: float = 0.0  # 敌方减防（模块各自维护贡献值，增量式累加/撤销）
     vulnerability: float = 0.0  # 敌方易伤（同上，增量式管理，如千冶【煞火缠身】）
+    max_hp: float = 100000.0   # 生命值上限
+    current_hp: float | None = None  # 当前生命值（None = 战斗开始满血，取 max_hp）
     # 减伤 / 抗性 / 防御 buff（由 BuffManager 管理）
     buff_mgr: BuffManager = field(default_factory=lambda: BuffManager(unit_id=""))
 
     def __post_init__(self) -> None:
         self.buff_mgr.unit_id = self.unit_id
+        if self.current_hp is None:
+            self.current_hp = self.max_hp
+
+    @property
+    def is_dead(self) -> bool:
+        """是否已死亡（HP 归零）。"""
+        return self.current_hp <= 0
 
     def reduce_toughness(self, amount: float, element: str) -> bool:
         """削减韧性，返回是否触发击破。
@@ -114,8 +124,8 @@ class CharacterUnit:
     elation_skill_index: int = 0  # 欢愉技参演编号
     elation_skill_level: int = 1  # 欢愉技等级（识别逻辑 TODO，暂只存储）
     char_id: str = ""        # nanoka 角色 ID（用于加载头像，空表示无头像）
-    current_hp: float = 0.0  # 当前生命值（最小 HP 模型：模块在 on_battle_start 初始化
-    #                        为面板生命上限，生命消耗/回复由模块管理；上限取 final_stats().hp）
+    current_hp: float = 0.0  # 当前生命值（我方 HP 模型：setup() 初始化为面板生命上限，
+    #                        生命消耗/回复由角色模块读写；上限取 final_stats().hp）
     skill_trees_raw: dict = field(default_factory=dict)  # 原始行迹（模块读额外能力参数用）
 
     def __post_init__(self) -> None:
@@ -198,6 +208,17 @@ class PlayerAction:
     notes: str = ""
 
 
+@dataclass
+class EnemyAttack:
+    """配置的敌方攻击（木桩攻击调度）。"""
+
+    total_av: float                    # 攻击发生时对应的总行动值
+    source_enemy_index: int = 0        # 释放攻击的敌方目标（0-4，对应场上第几个敌人）
+    attack: float = 0.0                # 本次攻击攻击力
+    target_indices: list[int] = field(default_factory=list)  # 本次攻击选取的角色（多选）
+    energy_recover: float = 0.0        # 本次攻击为角色恢复的能量（普通回能，吃能量恢复效率）
+
+
 # ── 战斗模拟器 ────────────────────────────────────────────
 
 
@@ -244,6 +265,8 @@ class BattleSimulator:
     max_av: float = 300.0              # 战斗结束条件：总行动值达到此值
     max_turns: int = 1000              # 备用安全网（防死循环）
     initial_sp: int = 3
+    rng_seed: int = 0                  # 多敌人随机目标用固定种子（可复现）
+    enemy_attacks: list[EnemyAttack] = field(default_factory=list)  # 敌方攻击配置
 
     # 内部状态
     action_queue: ActionQueue = field(default_factory=ActionQueue)
@@ -261,21 +284,33 @@ class BattleSimulator:
     # 行动条倒计时单位（倒计时 unit_id → 所属角色 unit_id）
     # 如千冶无量忿怒倒计时：倒计时行动时触发模块 on_countdown（结界解除）
     countdown_units: dict[str, str] = field(default_factory=dict)
+    # 敌方攻击调度（行动条上的调度 unit_id → EnemyAttack 配置）
+    _enemy_attack_map: dict[str, EnemyAttack] = field(default_factory=dict)
     # 行动令牌：每次技能施放（_resolve_skill）递增。
     # 一次行动内的所有命中（主伤害 + 模块 on_skill_end 追击链）共享同一令牌，
     # 供模块按"行动"粒度去重（如千冶天赋"每次攻击 +1 充能"——不死途终结技
     # 后的强化追击/婪酣追击链整体视为一次行动）。模块可用 begin_new_action()
     # 主动开启新行动（如千冶天赋额外施放的战技为独立行动）。
     action_token: int = 0
+    # 冻结令牌：当前行动（_resolve_skill 入口）的 action_token。
+    # 模块在 on_skill_end 中追加"全体/随机/相邻"伤害时用它作为去重键，
+    # 保证这些命中与主伤害同属一次行动（不因 on_attack_hit 内的
+    # begin_new_action 而改变）。每次 _resolve_skill 时重算，无需快照。
+    frozen_action_token: int = 0
 
     def setup(self) -> None:
         """战斗初始化。"""
+        # 重置随机数发生器（固定种子，保证多敌人随机目标可复现）
+        self._rng = random.Random(self.rng_seed)
+
         # SP
         self.sp = SkillPoint(initial=self.initial_sp)
 
         # 初始能量（freesr sp_value，钳制到能量上限；默认 0 保持原行为）
+        # 我方 HP：战斗开始满血（面板生命上限，含遗器/行迹，不含战斗内 buff）
         for char in self.characters:
             char.energy = min(char.initial_energy, char.base_stats.energy_max)
+            char.current_hp = char.final_stats().hp
 
         # 行动队列
         self.action_queue = ActionQueue()
@@ -289,11 +324,27 @@ class BattleSimulator:
             ))
         for enemy in self.enemies:
             spd = enemy.speed
+            if spd <= 0:
+                # 速度 0 的怪物（如木桩）：不进入行动队列，永不行动
+                continue
             self.action_queue.add(ActionEntry(
                 unit_id=enemy.unit_id,
                 name=enemy.name,
                 speed=spd,
                 current_av=AV_PER_ACTION / spd,
+                is_monster=True,
+            ))
+
+        # 敌方攻击调度：木桩速度 0，但按配置的总行动值强制行动
+        self._enemy_attack_map = {}
+        for i, atk in enumerate(self.enemy_attacks):
+            unit_id = f"__enemy_attack_{i}__"
+            self._enemy_attack_map[unit_id] = atk
+            self.action_queue.add(ActionEntry(
+                unit_id=unit_id,
+                name=f"敌方攻击{i + 1}",
+                speed=1.0,               # 占位（AV 由 total_av 直接指定，不用此速度）
+                current_av=atk.total_av,  # 行动值推进到该值即强制行动
                 is_monster=True,
             ))
 
@@ -399,11 +450,12 @@ class BattleSimulator:
             del self.countdown_units[unit_id]
 
     def is_auto_unit(self, actor: ActionEntry) -> bool:
-        """该行动者是否自动行动（怪物/阿哈/倒计时），无需玩家选择技能。"""
+        """该行动者是否自动行动（怪物/阿哈/倒计时/敌方攻击），无需玩家选择技能。"""
         return (
             actor.is_monster
             or actor.unit_id == "__aha__"
             or actor.unit_id in self.countdown_units
+            or actor.unit_id in self._enemy_attack_map
         )
 
     def run(self, actions: list[PlayerAction] | None = None) -> BattleResult:
@@ -420,6 +472,9 @@ class BattleSimulator:
         actor: ActionEntry | None = None
 
         while self.total_av < self.max_av and self.current_turn < self.max_turns:
+            # 全部敌人死亡：战斗强制结束
+            if not self.enemies:
+                break
             # 取下一个行动者
             if not self.action_queue.entries:
                 break
@@ -440,6 +495,11 @@ class BattleSimulator:
             # 倒计时（如无量忿怒倒计时）：触发所属模块 on_countdown 后移除
             if actor.unit_id in self.countdown_units:
                 self._countdown_act(actor)
+                continue
+
+            # 敌方攻击（配置调度，木桩速度 0 也强制行动）
+            if actor.unit_id in self._enemy_attack_map:
+                self._enemy_attack_act(actor)
                 continue
 
             # 怪物行动
@@ -470,7 +530,9 @@ class BattleSimulator:
             self._character_act(char, action, actor)
 
         # 判断结束原因
-        if self.total_av >= self.max_av:
+        if not self.enemies:
+            end_reason = BattleEndReason.ALL_ENEMIES_DEAD
+        elif self.total_av >= self.max_av:
             end_reason = BattleEndReason.MAX_AV
         elif not self.action_queue.entries:
             end_reason = BattleEndReason.NO_ACTIONS
@@ -501,6 +563,8 @@ class BattleSimulator:
         """
         if self.total_av >= self.max_av or self.current_turn >= self.max_turns:
             return None
+        if not self.enemies:
+            return None
         if not self.action_queue.entries:
             return None
 
@@ -521,6 +585,11 @@ class BattleSimulator:
             self._countdown_act(actor)
             return self.logs[-1] if self.logs else None
 
+        # 敌方攻击（配置调度，木桩速度 0 也强制行动）
+        if actor.unit_id in self._enemy_attack_map:
+            self._enemy_attack_act(actor)
+            return self.logs[-1] if self.logs else None
+
         # 怪物行动
         if actor.is_monster:
             self._monster_act(actor)
@@ -537,7 +606,7 @@ class BattleSimulator:
 
         return self._character_act(char, action, actor)
 
-    def execute_ultra(self, char_index: int) -> ActionLog | None:
+    def execute_ultra(self, char_index: int, target_id: str = "") -> ActionLog | None:
         """释放终结技（插队，不推进行动队列，不消耗回合）。
 
         插队位置 = 当前时间（total_av）：交互模式中"行动后插队"停在行动者位置，
@@ -545,6 +614,7 @@ class BattleSimulator:
 
         Args:
             char_index: 角色在队伍中的位置（0-3）
+            target_id: 目标敌人 unit_id（空则默认第一个敌人）
 
         Returns: 终结技的 ActionLog；能量不足或角色不存在则返回 None
         """
@@ -572,7 +642,7 @@ class BattleSimulator:
         if char.energy < energy_cost:
             return None
 
-        target_id = self.enemies[0].unit_id if self.enemies else ""
+        target_id = target_id or (self.enemies[0].unit_id if self.enemies else "")
         action = PlayerAction(
             unit_id=char.unit_id,
             skill_type=SkillType.ULTRA,
@@ -598,6 +668,7 @@ class BattleSimulator:
             "pending_av_actor": self.pending_av_actor,
             "countdown_units": dict(self.countdown_units),
             "action_token": self.action_token,
+            "rng_state": self._rng.getstate() if hasattr(self, "_rng") else None,
         }
 
     def restore(self, snap: dict) -> None:
@@ -616,6 +687,11 @@ class BattleSimulator:
         self.pending_av_actor = snap.get("pending_av_actor")
         self.countdown_units = dict(snap.get("countdown_units", {}))
         self.action_token = snap.get("action_token", 0)
+        # 恢复随机数发生器状态（旧快照无此字段则用种子重置）
+        self._rng = random.Random(self.rng_seed)
+        rng_state = snap.get("rng_state")
+        if rng_state is not None:
+            self._rng.setstate(rng_state)
 
     def _get_character(self, unit_id: str) -> CharacterUnit | None:
         for c in self.characters:
@@ -764,6 +840,7 @@ class BattleSimulator:
         """
         # 新行动：令牌递增（本行动主伤害与模块追击链共享）
         self.action_token += 1
+        self.frozen_action_token = self.action_token
         # SP / 能量结算
         if skill.sp_cost > 0:
             self.sp.consume(skill.sp_cost)
@@ -819,6 +896,8 @@ class BattleSimulator:
             # 必须用冻结值，否则会被中途新增的令牌误判为"同行动"
             hit_token = self.action_token
             for effect in skill.effects:
+                if target.is_dead:
+                    break  # 目标已死亡离场，跳过后续段
                 damage = self._calc_skill_damage(char, effect, target)
                 log.damages.append(damage)
                 log.total_damage += damage
@@ -832,6 +911,11 @@ class BattleSimulator:
                     )
                 )
                 self.total_damage += damage
+                # 扣血：HP 归零则死亡离场
+                self._apply_enemy_hp_damage(target, damage)
+
+                if target.is_dead:
+                    continue  # 目标死亡，跳过削韧/击破与命中钩子
 
                 # 削韧
                 if effect.toughness_damage > 0:
@@ -853,6 +937,10 @@ class BattleSimulator:
                             )
                         )
                         self.total_damage += break_dmg
+                        self._apply_enemy_hp_damage(target, break_dmg)
+
+                if target.is_dead:
+                    continue  # 击破伤害击杀目标，跳过命中钩子
 
                 # buff 触发（攻击命中）
                 char.buff_mgr.tick_attack()
@@ -879,6 +967,11 @@ class BattleSimulator:
         for module in self.char_modules.values():
             self._dispatch_hook(module, "on_skill_end", self, char, skill, action, target, log)
 
+        # 技能收尾钩子（在所有模块 on_skill_end 之后分发，顺序无关）：
+        # 供"行动完全结束"才结算的效果使用（如缇宝结界附加伤害取被攻击目标中生命最高者）
+        for module in self.char_modules.values():
+            self._dispatch_hook(module, "on_post_skill", self, char, skill, action, target, log)
+
         if is_turn:
             self.action_queue.advance()
 
@@ -889,9 +982,11 @@ class BattleSimulator:
         char: CharacterUnit,
         effect: SkillEffect,
         target: EnemyState,
+        stats: FinalStats | None = None,
     ) -> float:
-        """计算技能单段伤害。"""
-        stats = char.final_stats()
+        """计算技能单段伤害。stats 为属性快照（None 用当前面板）。"""
+        if stats is None:
+            stats = char.final_stats()
         element = effect.element or char.element
         is_weakness = element in target.weakness_elements
 
@@ -1002,6 +1097,8 @@ class BattleSimulator:
         secondary_skill_type: SkillType | None = None,
         log: ActionLog | None = None,
         is_attack: bool = True,
+        action_token: int | None = None,
+        stats: FinalStats | None = None,
     ) -> float:
         """公共打伤害入口（角色模块用）。
 
@@ -1020,8 +1117,13 @@ class BattleSimulator:
                 （如缇宝结界附加伤害）：不触发 on_attack_hit 钩子与
                 NEXT_ATTACK buff tick——"攻击后"系效果（不死途天赋、
                 千冶充能等）不应被附加伤害触发（附加伤害 ≠ 攻击）
+            action_token: 命中去重令牌；None 用当前 action_token。
+                "全体/随机/相邻"等同一行动的多段伤害应传冻结的
+                self.frozen_action_token，保证按"行动"粒度去重。
+            stats: 属性快照（None 用当前面板）。延迟结算的伤害（如缇宝结界
+                附加伤害）应传命中时的属性快照，避免吃到行动中段新增的 buff。
         """
-        damage = self._calc_skill_damage(attacker, effect, target)
+        damage = self._calc_skill_damage(attacker, effect, target, stats)
 
         if log is not None:
             log.damages.append(damage)
@@ -1037,9 +1139,11 @@ class BattleSimulator:
                 )
             )
         self.total_damage += damage
+        # 扣血：HP 归零则死亡离场
+        self._apply_enemy_hp_damage(target, damage)
 
-        # 削韧与击破
-        if effect.toughness_damage > 0:
+        # 削韧与击破（目标存活时才结算）
+        if not target.is_dead and effect.toughness_damage > 0:
             broken = target.reduce_toughness(
                 effect.toughness_damage, effect.element or attacker.element
             )
@@ -1060,16 +1164,18 @@ class BattleSimulator:
                     )
                     log_damage.enemy_broken = True
                 self.total_damage += break_dmg
+                self._apply_enemy_hp_damage(target, break_dmg)
 
         # 攻击命中钩子（模块可响应，如天赋追加攻击判定；skill 非模块发起时为 None）
         # 追加攻击等独立行动使用当前 action_token（begin_new_action 已生效）
-        if is_attack:
+        token = self.action_token if action_token is None else action_token
+        if is_attack and not target.is_dead:
             attacker.buff_mgr.tick_attack()
             target.buff_mgr.tick_attack()
             for module in self.char_modules.values():
                 self._dispatch_hook(
                     module, "on_attack_hit",
-                    self, attacker, None, target, effect, damage, log, self.action_token,
+                    self, attacker, None, target, effect, damage, log, token,
                 )
 
         return damage
@@ -1127,6 +1233,33 @@ class BattleSimulator:
         """
         self.action_token += 1
 
+    def random_enemy(self) -> EnemyState | None:
+        """确定性随机返回一名敌人（固定种子，多敌人随机单体目标用）。
+
+        使用 setup() 重置的固定种子 RNG，保证同一 rng_seed 下结果可复现。
+        """
+        if not self.enemies:
+            return None
+        return self._rng.choice(self.enemies)
+
+    def _apply_enemy_hp_damage(self, enemy: EnemyState, amount: float) -> bool:
+        """对敌人造成伤害，HP 归零时死亡离场。返回是否本次造成死亡。"""
+        if amount <= 0 or enemy.is_dead:
+            return False
+        enemy.current_hp = max(0.0, enemy.current_hp - amount)
+        if enemy.current_hp <= 0:
+            self._on_enemy_dead(enemy)
+            return True
+        return False
+
+    def _on_enemy_dead(self, enemy: EnemyState) -> None:
+        """敌人死亡离场：移出敌人列表与行动队列，通知模块清理引用。"""
+        self.action_queue.remove(enemy.unit_id)
+        if enemy in self.enemies:
+            self.enemies.remove(enemy)
+        for module in self.char_modules.values():
+            self._dispatch_hook(module, "on_enemy_dead", self, enemy)
+
     def recover_energy(self, char: CharacterUnit, amount: float, *, fixed: bool = False) -> float:
         """回复角色能量（钳制到能量上限），返回实际回复量。
 
@@ -1142,6 +1275,67 @@ class BattleSimulator:
             actual = amount * (1 + char.final_stats().energy_regen)
         char.energy = min(char.base_stats.energy_max, char.energy + actual)
         return char.energy - before
+
+    def _enemy_attack_act(self, entry: ActionEntry) -> None:
+        """配置的敌方攻击（行动值推进到 total_av 时强制行动）。
+
+        按配置对选中的每个目标角色造成伤害（扣血）并恢复能量。
+        """
+        atk = self._enemy_attack_map.get(entry.unit_id)
+        if atk is None:
+            self.action_queue.advance()
+            self.action_queue.remove(entry.unit_id)
+            return
+
+        # 释放攻击的敌方目标
+        source = (
+            self.enemies[atk.source_enemy_index]
+            if 0 <= atk.source_enemy_index < len(self.enemies)
+            else (self.enemies[0] if self.enemies else None)
+        )
+
+        log = ActionLog(
+            av=entry.current_av,
+            total_av=self.total_av,
+            actor_id=source.unit_id if source else entry.unit_id,
+            actor_name=source.name if source else entry.name,
+            action_type="enemy_attack",
+            notes="",
+        )
+        self.logs.append(log)
+
+        enemy_level = self.enemies[0].level if self.enemies else 80
+        for idx in atk.target_indices:
+            if not (0 <= idx < len(self.characters)):
+                continue
+            char = self.characters[idx]
+
+            # 敌人攻击角色：伤害 = 攻击力 × 防御系数（属性固定物理，暂无影响）
+            defense = char.final_stats().defense
+            def_coeff = (10 * enemy_level + 200) / (10 * enemy_level + 200 + defense)
+            damage = atk.attack * def_coeff
+            if damage > 0:
+                char.current_hp = max(0.0, char.current_hp - damage)
+                log.damages.append(damage)
+                log.total_damage += damage
+                log.damage_records.append(
+                    DamageRecord(
+                        value=damage,
+                        skill_type=SkillType.NORMAL,
+                        damage_type=DamageType.NORMAL,
+                        element="Physical",
+                        target_id=char.unit_id,
+                    )
+                )
+                self.total_damage += damage
+            # 恢复能量：走 recover_energy，普通回能享受能量恢复效率加成
+            if atk.energy_recover:
+                self.recover_energy(char, atk.energy_recover)
+            log.energy_after = char.energy
+            log.sp_after = self.sp.current
+
+        self.action_queue.advance()
+        self.action_queue.remove(entry.unit_id)
 
     def _monster_act(self, entry: ActionEntry) -> None:
         """怪物行动。"""
@@ -1241,6 +1435,7 @@ class BattleSimulator:
                 log.damages.append(dmg)
                 log.total_damage += dmg
                 self.total_damage += dmg
+                self._apply_enemy_hp_damage(target, dmg)
 
         # 3. 清空笑点
         for char in self.characters:

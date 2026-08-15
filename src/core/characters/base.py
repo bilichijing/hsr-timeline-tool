@@ -104,6 +104,21 @@ class CharacterModule:
     ) -> None:
         """技能结算后（本行动日志已入列）：触发终结技强化链等。"""
 
+    def on_post_skill(
+        self,
+        sim: BattleSimulator,
+        char: CharacterUnit,
+        skill: Skill,
+        action: PlayerAction,
+        target: EnemyState | None,
+        log: ActionLog,
+    ) -> None:
+        """技能结算（含所有模块 on_skill_end、追击链）完成后：做收尾结算。
+
+        在所有模块 on_skill_end 之后分发，顺序无关——供需要"行动完全结束"
+        才结算的效果使用（如缇宝结界附加伤害取被攻击目标中生命值最高者）。
+        """
+
     def on_enemy_act(
         self,
         sim: BattleSimulator,
@@ -111,6 +126,24 @@ class CharacterModule:
         log: ActionLog,
     ) -> None:
         """怪物行动后：敌方回合计时（如千冶【煞火缠身】剩余回合 -1）。"""
+
+    def on_enemy_dead(
+        self,
+        sim: BattleSimulator,
+        enemy: EnemyState,
+    ) -> None:
+        """敌人死亡离场后：清理模块对它的引用（如饲饵、煞火缠身）。"""
+
+    def enemy_buffs(
+        self,
+        sim: BattleSimulator,
+        enemy: EnemyState,
+    ) -> list[tuple[str, str]]:
+        """返回本模块施加在该敌人身上的 debuff（名称, 描述）列表；无则返回空列表。
+
+        供 UI 敌方目标 buff 弹窗逐条展示（不合并数值）。
+        """
+        return []
 
     def skill_deny_reason(self, sim: BattleSimulator, char: CharacterUnit) -> str | None:
         """战技施放被拒绝的原因（None=可施放）。UI 弹窗提示用。"""

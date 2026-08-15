@@ -46,31 +46,39 @@ def strip_rich_text(text: str) -> str:
     return _RICH_TAG_RE.sub("", text)
 
 
-# nanoka 参数占位符：#1[i] #2[i]（注意：不匹配后面的 %，让 % 保留在原文）
-_PARAM_PLACEHOLDER_RE = re.compile(r"#(\d+)\[i\]")
+# nanoka 参数占位符：#1[i]（整数）、#2[f1]（浮点，1 位小数）
+# 注意：不匹配后面的 %，让 % 保留在原文（如 #1[i]% 的 % 是描述自带）
+_PARAM_PLACEHOLDER_RE = re.compile(r"#(\d+)\[([if])(\d*)\]")
 
 
 def interpolate_params(text: str, params: list[float]) -> str:
-    """替换 #1[i] 等占位符为实际参数值。
+    """替换 #1[i] / #2[f1] 等占位符为实际参数值。
 
     示例：
         interpolate_params('攻击力提高#1[i]%', [0.5]) → '攻击力提高50%'
         interpolate_params('每有#1[i]层【婪酣】', [1]) → '每有1层【婪酣】'
+        interpolate_params('恢复#2[f1]点能量', [30, 1.5]) → '恢复1.5点能量'
 
-    占位符后紧跟 % 的按百分比显示（0.5 → 50%），
-    否则按原值显示（层数/次数等，如 1.0 → 1）。
+    格式说明：
+    - [i] 整数：去尾零（1.0 → 1、1.5 → 1.5）
+    - [fN] 浮点：保留 N 位小数（[f1]：1.5 → 1.5、2.0 → 2.0）
+    - 占位符后紧跟 % 的按百分比显示（0.5 → 50）
     """
     def replacer(m: re.Match) -> str:
         idx = int(m.group(1)) - 1  # #1 对应 params[0]
+        fmt = m.group(2)           # "i" 或 "f"
+        digits = m.group(3)        # "" 或 "1"/"2"
         if 0 <= idx < len(params):
             val = params[idx]
             # 占位符后是否紧跟 %（决定百分比/原值显示）
             after = text[m.end():m.end() + 1]
             if after == "%":
-                # 0.5 → 50, 0.123 → 12.3
-                pct = val * 100
-                return str(int(pct)) if pct == int(pct) else str(pct)
-            # 层数/次数等原值显示（1.0 → 1）
+                val = val * 100
+            if fmt == "f" and digits:
+                return f"{val:.{int(digits)}f}"
+            # 整数格式 [i]：去尾零（0.5 → 50 已在上面 ×100 处理）
+            if val == int(val):
+                return str(int(val))
             return f"{val:g}"
         return m.group(0)
 

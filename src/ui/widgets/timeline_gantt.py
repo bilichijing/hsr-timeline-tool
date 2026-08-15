@@ -56,6 +56,7 @@ ACTION_COLORS: dict[str, QColor] = {
     "follow_up":  QColor(168, 130, 212),   # 紫色（追加攻击）
     "technique":  QColor(120, 200, 170),   # 青绿（秘技）
     "countdown":  QColor(110, 180, 190),   # 青灰（倒计时，如无量忿怒）
+    "enemy_attack": QColor(229, 84, 78),   # 红色（敌方攻击）
 }
 
 ACTION_LABELS_ZH: dict[str, str] = {
@@ -67,6 +68,7 @@ ACTION_LABELS_ZH: dict[str, str] = {
     "follow_up": "追加攻击",
     "technique": "秘技",
     "countdown": "倒计时",
+    "enemy_attack": "敌方攻击",
 }
 
 LANE_HEIGHT = 80

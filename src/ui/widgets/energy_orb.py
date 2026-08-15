@@ -55,7 +55,10 @@ class EnergyOrbWidget(QWidget):
         self._charge: float | None = None
         self._max_charge: int = 3
         self._charge_text: tuple[int, int] | None = None  # (当前, 上限)，None 不显示
-        self.setMinimumSize(130, 100)
+        # 我方血量（头像下方血条）
+        self._hp: float = 1.0
+        self._hp_max: float = 1.0
+        self.setMinimumSize(130, 110)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
 
     def set_name(self, name: str) -> None:
@@ -87,6 +90,12 @@ class EnergyOrbWidget(QWidget):
     def set_avatar(self, pixmap: QPixmap | None) -> None:
         """设置角色头像（左侧显示）。"""
         self._avatar = pixmap
+        self.update()
+
+    def set_hp(self, current: float, maximum: float) -> None:
+        """设置我方当前/上限生命值（头像下方血条）。"""
+        self._hp = max(0.0, current)
+        self._hp_max = maximum if maximum > 0 else 1.0
         self.update()
 
     def set_charge(self, charge: float | None, max_charge: int = 3) -> None:
@@ -122,16 +131,18 @@ class EnergyOrbWidget(QWidget):
         w = self.width()
         h = self.height()
 
-        # 布局：左侧头像 + 右侧能量圆
+        # 布局：左侧头像 + 右侧能量圆；头像下方血条
         # 头像尺寸与圆形一致
         text_h = 18
         name_h = 16
+        hp_h = 6          # 血条高度
+        hp_gap = 2        # 头像与血条间距
         gap = 6  # 头像与圆形之间的间距
 
         # 计算圆形尺寸（右侧）
         circle_size = min(
             (w - gap) / 2 - 4,
-            h - text_h - name_h - 4,
+            h - text_h - name_h - hp_h - hp_gap - 4,
         )
         if circle_size < 30:
             circle_size = 30
@@ -139,11 +150,11 @@ class EnergyOrbWidget(QWidget):
         # 头像尺寸与圆形相同（左侧）
         avatar_size = circle_size
         avatar_x = 4
-        avatar_y = text_h + 2 + (h - text_h - name_h - 4 - avatar_size) / 2
+        avatar_y = text_h + 2 + (h - text_h - name_h - hp_h - hp_gap - 4 - avatar_size) / 2
 
         # 圆形位置（右侧）
         circle_x = avatar_x + avatar_size + gap
-        circle_y = text_h + 2 + (h - text_h - name_h - 4 - circle_size) / 2
+        circle_y = text_h + 2 + (h - text_h - name_h - hp_h - hp_gap - 4 - circle_size) / 2
         circle_rect = QRectF(circle_x, circle_y, circle_size, circle_size)
         avatar_rect = QRectF(avatar_x, avatar_y, avatar_size, avatar_size)
 
@@ -151,7 +162,7 @@ class EnergyOrbWidget(QWidget):
         font = QFont("Microsoft YaHei UI", 9)
         font.setBold(True)
         painter.setFont(font)
-        energy_text = f"{self._energy:.0f}/{self._max_energy:.0f}"
+        energy_text = f"{self._energy:.1f}/{self._max_energy:.0f}"
         text_color = QColor(Colors.GOLD) if self.is_full() else QColor(Colors.TEXT_PRIMARY)
         painter.setPen(text_color)
         text_rect = QRectF(circle_x - 4, 0, circle_size + 8, text_h)
@@ -203,6 +214,23 @@ class EnergyOrbWidget(QWidget):
             self._draw_charge_badge(painter, avatar_rect)
         elif self._charge_text is not None:
             self._draw_charge_text_badge(painter, avatar_rect)
+
+        # 2.5 绘制头像下方血条（我方当前生命值）
+        hp_rect = QRectF(avatar_x, avatar_rect.bottom() + hp_gap, avatar_size, hp_h)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor(Colors.BG_CARD)))
+        painter.drawRoundedRect(hp_rect, 2, 2)
+        hp_ratio = max(0.0, min(1.0, self._hp / self._hp_max))
+        if hp_ratio > 0:
+            painter.setBrush(QBrush(QColor(0x5F, 0xC9, 0x7E)))  # 生命绿
+            painter.drawRoundedRect(
+                QRectF(hp_rect.left(), hp_rect.top(), hp_rect.width() * hp_ratio, hp_rect.height()),
+                2, 2,
+            )
+        # 血条边框
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QColor(Colors.BORDER), 1))
+        painter.drawRoundedRect(hp_rect, 2, 2)
 
         # 3. 绘制圆形背景（深色底）
         painter.setBrush(QBrush(QColor(Colors.BG_DEEPEST)))

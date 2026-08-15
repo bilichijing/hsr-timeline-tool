@@ -42,6 +42,11 @@ ELATION_BASE_LEVEL_80 = 7535.107
 DEFAULT_RESISTANCE_WEAK = 0.0     # 弱点属性默认抗性
 DEFAULT_RESISTANCE_NON_WEAK = 0.20  # 非弱点属性默认抗性
 
+# 星铁全部 7 种属性（构造怪物属性抗性表用）
+ALL_ELEMENTS: list[str] = [
+    "Physical", "Fire", "Ice", "Thunder", "Wind", "Quantum", "Imaginary",
+]
+
 # 抗性钳制范围
 RESISTANCE_MIN = -1.0   # -100%
 RESISTANCE_MAX = 0.90   # 90%
@@ -134,6 +139,25 @@ def calc_resistance(ctx: DamageContext) -> float:
     res = res - ctx.res_pen
     res = max(RESISTANCE_MIN, min(RESISTANCE_MAX, res))
     return 1 - res
+
+
+def build_enemy_resistance(
+    weakness_elements: list[str],
+    non_weak_resistance: float = DEFAULT_RESISTANCE_NON_WEAK,
+    all_elements: list[str] | None = None,
+) -> dict[str, float]:
+    """构造怪物属性抗性表 {属性: 抗性}。
+
+    规则：怪物持有弱点的对应属性抗性为 0，
+    其余属性使用"非弱点属性抗性"配置（默认 20%）。
+    与 calc_resistance 的默认回退行为（弱点 0% / 非弱点 20%）一致。
+    """
+    elements = all_elements if all_elements is not None else ALL_ELEMENTS
+    weak_set = set(weakness_elements)
+    return {
+        elem: 0.0 if elem in weak_set else non_weak_resistance
+        for elem in elements
+    }
 
 
 # ── 防御系数（6.4.2）──────────────────────────────────────
