@@ -27,3 +27,4 @@ def get_module_cls(lightcone_id: str) -> type[LightconeModule] | None:
 from . import lie_23056  # noqa: E402, F401
 from . import blaze_23059  # noqa: E402, F401
 from . import flower_23038  # noqa: E402, F401
+from . import rainbow_23042  # noqa: E402, F401

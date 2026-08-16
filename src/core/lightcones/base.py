@@ -71,6 +71,13 @@ class LightconeModule:
     ) -> None:
         """行动完全结束后。"""
 
+    def on_memo_skill_end(
+        self,
+        sim: BattleSimulator,
+        owner: CharacterUnit,
+    ) -> None:
+        """装备者的忆灵技完整结算后（含全部目标伤害）。"""
+
     def on_attack_hit(
         self,
         sim: BattleSimulator,

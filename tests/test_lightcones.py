@@ -8,6 +8,7 @@ from src.core.lightcones import get_module_cls
 from src.core.lightcones.blaze_23059 import BlazeRebornModule
 from src.core.lightcones.flower_23038 import FlowerOfTimeModule
 from src.core.lightcones.lie_23056 import LieFinaleModule
+from src.core.lightcones.rainbow_23042 import RainbowSkyModule
 from src.core.simulator import ActionEntry, BattleSimulator, CharacterUnit, EnemyState
 from src.core.skill import Skill, SkillType
 from src.core.stats import BaseStats, StatBonus
@@ -52,6 +53,7 @@ class TestRegistry:
         assert get_module_cls("23056") is LieFinaleModule
         assert get_module_cls("23059") is BlazeRebornModule
         assert get_module_cls("23038") is FlowerOfTimeModule
+        assert get_module_cls("23042") is RainbowSkyModule
 
 
 class TestLieFinale:
@@ -201,3 +203,46 @@ class TestFlowerOfTime:
             sim, char, char, SkillType.FOLLOW_UP, enemy, 100, None, 1,
         )
         assert char.energy == pytest.approx(before + 12)
+
+
+class TestRainbowSky:
+    PARAMS = [0.18, 0.01, 0.0, 0.18, 2, 2.5]
+
+    def _sim(self):
+        owner = CharacterUnit(unit_id="c1", name="风堇", path="Memory", element="Wind", level=80)
+        owner.base_stats = BaseStats(hp_base=5000, spd_base=100, energy_max=140)
+        owner.bonus_stats = StatBonus()
+        owner.lightcone_id = "23042"
+        owner.lightcone_rank = 1
+        owner.lightcone_params = list(self.PARAMS)
+        ally = CharacterUnit(unit_id="ally", name="队友", path="Rogue", element="Thunder", level=80)
+        ally.base_stats = BaseStats(hp_base=5000, spd_base=100)
+        ally.bonus_stats = StatBonus()
+        enemy = EnemyState(
+            unit_id="e1", name="木桩",
+            max_hp=100000, current_hp=100000,
+            max_toughness=100, current_toughness=100,
+            weakness_elements=["Wind"], speed=0,
+        )
+        sim = BattleSimulator(characters=[owner, ally], enemies=[enemy])
+        sim.setup()
+        return owner, sim, sim.lightcone_modules[owner.unit_id]
+
+    def test_consume_and_extra_damage(self):
+        from src.core.skill import Skill, SkillType
+
+        owner, sim, module = self._sim()
+        ally = sim.characters[1]
+        before_owner = owner.current_hp
+        before_ally = ally.current_hp
+        skill = Skill(id="s", name="战技", skill_type=SkillType.SKILL)
+        module.on_skill_cast(sim, owner, skill, None, sim.enemies[0], None)
+        assert owner.current_hp == pytest.approx(before_owner * 0.99)
+        assert ally.current_hp == pytest.approx(before_ally * 0.99)
+        consumed = before_owner * 0.01 + before_ally * 0.01
+        assert module.consumed_total == pytest.approx(consumed)
+        enemy_hp_before = sim.enemies[0].current_hp
+        module.on_memo_skill_end(sim, owner)
+        assert sim.enemies[0].current_hp < enemy_hp_before
+        assert module.consumed_total == 0
+        assert sim.enemies[0].vulnerability == pytest.approx(0.18)

@@ -282,6 +282,10 @@ class HyacineModule(CharacterModule):
                 skill_type=SkillType.MEMO_DNSKILL,
                 log=log, stats=stats,
             )
+        # 通知光锥：忆灵技完整结算完成（额外伤害/敌方易伤等）
+        lc_module = sim.lightcone_modules.get(char.unit_id)
+        if lc_module is not None:
+            sim._dispatch_lightcone_hook(lc_module, "on_memo_skill_end", sim, char)
         self.cumulative_healing *= max(0.0, 1.0 - clear_ratio)
         # 小伊卡技能后，自身持续效果回合 -1
         if self.memo_bonus_turns > 0:
