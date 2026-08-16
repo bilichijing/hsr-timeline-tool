@@ -725,17 +725,14 @@ class BattleSimulatorWindow(QMainWindow):
         self.team_table = QTableWidget(4, COL_COUNT)
         self.team_table.setHorizontalHeaderLabels(TABLE_HEADERS)
         header = self.team_table.horizontalHeader()
-        # 名称/光锥列可伸缩，12 项属性固定宽度，横向滚动
-        header.setSectionResizeMode(COL_NAME, QHeaderView.Interactive)
-        header.setSectionResizeMode(COL_LIGHTCONE, QHeaderView.Interactive)
-        for col in range(2, COL_COUNT):
-            header.setSectionResizeMode(col, QHeaderView.Fixed)
+        # 全部列按内容自适应宽度
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setDefaultSectionSize(90)
-        # 表头 tooltip：百分比列注明小数格式；属性增伤注明适用角色自身属性
+        # 表头 tooltip：百分比列注明显示格式；属性增伤注明适用角色自身属性
         for col in range(2, COL_COUNT):
             tip = TABLE_HEADERS[col]
             if col in PERCENT_COLUMNS:
-                tip += "（小数，0.05 = 5%）"
+                tip += "（百分数显示，保留 1 位小数）"
             if col == COL_DMG_BONUS:
                 tip += "（仅该角色自身属性）"
             if col == COL_RANK:
@@ -1285,9 +1282,9 @@ class BattleSimulatorWindow(QMainWindow):
         )
 
     def _set_cell_value(self, row: int, col: int, value) -> None:
-        """写入面板列（百分比列 4 位小数，速度 1 位小数，其余原样）。"""
+        """写入面板列（百分比列显示为 xx.x%，速度 1 位小数，其余原样）。"""
         if col in PERCENT_COLUMNS:
-            text = f"{value:.4f}"
+            text = f"{float(value) * 100:.1f}%"
         elif col == COL_SPD:
             text = f"{value:.1f}"
         else:
@@ -1790,7 +1787,15 @@ class BattleSimulatorWindow(QMainWindow):
             name_item.setData(Qt.UserRole, rd)
             self.team_table.setItem(i, 0, name_item)
             for col, text in entry.get("cells", {}).items():
-                self.team_table.setItem(i, int(col), QTableWidgetItem(str(text)))
+                col_int = int(col)
+                # 旧缓存百分比列为小数文本，迁移为百分数显示
+                if col_int in PERCENT_COLUMNS and "%" not in str(text):
+                    try:
+                        self._set_cell_value(i, col_int, float(text))
+                        continue
+                    except ValueError:
+                        pass
+                self.team_table.setItem(col_int, QTableWidgetItem(str(text)))
             # 星魂等级：优先条目级 rank 字段，其次行数据（兼容旧缓存）
             rank_value = _int(entry.get("rank"), _int(rd.rank, 0))
             self._set_rank_cell(i, rank_value)
@@ -1957,8 +1962,13 @@ class BattleSimulatorWindow(QMainWindow):
             return item.text().strip() if item else default
 
         def cell_float(row: int, col: int, default: float) -> float:
+            text = cell_text(row, col, "")
+            if not text:
+                return default
             try:
-                return float(cell_text(row, col, "") or default)
+                if text.endswith("%"):
+                    return float(text[:-1]) / 100.0
+                return float(text)
             except ValueError:
                 return default
 
