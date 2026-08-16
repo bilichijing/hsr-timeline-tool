@@ -63,7 +63,7 @@ from src.core.character_factory import (
 )
 from src.core.buff import BuffDuration
 from src.core.damage import DamageType, build_enemy_resistance
-from src.core.freesr import compute_panel, lightcone_base_stats, parse_freesr
+from src.core.freesr import compute_panel, compute_panel_breakdown, lightcone_base_stats, parse_freesr
 from src.core.stats import StatCalculator
 from src.core.simulator import (
     BattleEndReason,
@@ -272,6 +272,8 @@ class _RowCharData:
     lightcone_desc: str = ""    # 当前叠影效果描述（插值后，tooltip 用）
     relic_set_counts: dict = field(default_factory=dict)  # {套装ID: 件数}
     relic_set_effects: dict = field(default_factory=dict)  # {套装ID: {"2": [...], "4": [...]}}
+    panel_white_base: dict = field(default_factory=dict)  # 白字基础：hp/atk/def/spd
+    panel_green_bonus: dict = field(default_factory=dict)  # 绿字加成：StatBonus 字段
     ranks_raw: dict = field(default_factory=dict)  # nanoka ranks 原始数据（星魂描述/参数）
     memosprite_raw: dict = field(default_factory=dict)  # nanoka memosprite 原始数据（忆灵）
 
@@ -1252,6 +1254,13 @@ class BattleSimulatorWindow(QMainWindow):
         base = convert_stats80(s)
         trace = extract_trace_bonuses(row_data.skill_trees_raw)
         final = StatCalculator(base=base, bonus=trace).final()
+        row_data.panel_white_base = {
+            "hp": base.hp_base,
+            "atk": base.atk_base,
+            "def": base.def_base,
+            "spd": base.spd_base,
+        }
+        row_data.panel_green_bonus = asdict(trace)
         self._set_cell_value(row, COL_HP, int(final.hp))
         self._set_cell_value(row, COL_ATK, int(final.atk))
         self._set_cell_value(row, COL_DEF, int(final.defense))
@@ -1635,12 +1644,19 @@ class BattleSimulatorWindow(QMainWindow):
                 if isinstance(effects, dict):
                     row_data.relic_set_effects[set_id] = effects
 
-            final = compute_panel(
+            white_base, green_bonus, final = compute_panel_breakdown(
                 row_data.stats80,
                 profile.relics.get(char_id, []),
                 lc_stats80,
                 row_data.skill_trees_raw,
             )
+            row_data.panel_white_base = {
+                "hp": white_base.hp_base,
+                "atk": white_base.atk_base,
+                "def": white_base.def_base,
+                "spd": white_base.spd_base,
+            }
+            row_data.panel_green_bonus = asdict(green_bonus)
             self._set_cell_value(row, COL_HP, int(final.hp))
             self._set_cell_value(row, COL_ATK, int(final.atk))
             self._set_cell_value(row, COL_DEF, int(final.defense))
@@ -2027,11 +2043,42 @@ class BattleSimulatorWindow(QMainWindow):
                     relic_set_counts=row_data.relic_set_counts,
                     relic_set_effects=row_data.relic_set_effects,
                 )
-                # 用户手动编辑的面板数值覆盖真实基础值（模拟遗器加成）
-                char.base_stats.hp_base = cell_float(row, COL_HP, char.base_stats.hp_base)
-                char.base_stats.atk_base = cell_float(row, COL_ATK, char.base_stats.atk_base)
-                char.base_stats.def_base = cell_float(row, COL_DEF, char.base_stats.def_base)
-                char.base_stats.spd_base = cell_float(row, COL_SPD, char.base_stats.spd_base)
+                # HP/ATK/DEF/SPD 使用“白字基础 + 绿字加成”拆分，
+                # 保证进战后百分比攻击/生命/防御/速度 buff 只乘白字基础。
+                white = row_data.panel_white_base or {}
+                green = row_data.panel_green_bonus or {}
+                if white:
+                    char.base_stats.hp_base = float(white.get("hp", char.base_stats.hp_base))
+                    char.base_stats.atk_base = float(white.get("atk", char.base_stats.atk_base))
+                    char.base_stats.def_base = float(white.get("def", char.base_stats.def_base))
+                    char.base_stats.spd_base = float(white.get("spd", char.base_stats.spd_base))
+                    char.bonus_stats.hp_pct = float(green.get("hp_pct", 0.0))
+                    char.bonus_stats.hp_flat = float(green.get("hp_flat", 0.0))
+                    char.bonus_stats.atk_pct = float(green.get("atk_pct", 0.0))
+                    char.bonus_stats.atk_flat = float(green.get("atk_flat", 0.0))
+                    char.bonus_stats.def_pct = float(green.get("def_pct", 0.0))
+                    char.bonus_stats.def_flat = float(green.get("def_flat", 0.0))
+                    char.bonus_stats.spd_pct = float(green.get("spd_pct", 0.0))
+                    char.bonus_stats.spd_flat = float(green.get("spd_flat", 0.0))
+
+                    def _sync_flat(base_attr: str, pct_attr: str, flat_attr: str, target: float) -> None:
+                        base = getattr(char.base_stats, base_attr)
+                        pct = getattr(char.bonus_stats, pct_attr)
+                        flat = getattr(char.bonus_stats, flat_attr)
+                        current = base * (1 + pct) + flat
+                        setattr(char.bonus_stats, flat_attr, flat + target - current)
+
+                    _sync_flat("hp_base", "hp_pct", "hp_flat", cell_float(row, COL_HP, char.final_stats().hp))
+                    _sync_flat("atk_base", "atk_pct", "atk_flat", cell_float(row, COL_ATK, char.final_stats().atk))
+                    _sync_flat("def_base", "def_pct", "def_flat", cell_float(row, COL_DEF, char.final_stats().defense))
+                    _sync_flat("spd_base", "spd_pct", "spd_flat", cell_float(row, COL_SPD, char.final_stats().spd))
+                else:
+                    # 旧缓存没有拆分明细：保持原来的总面板作为基础
+                    char.base_stats.hp_base = cell_float(row, COL_HP, char.base_stats.hp_base)
+                    char.base_stats.atk_base = cell_float(row, COL_ATK, char.base_stats.atk_base)
+                    char.base_stats.def_base = cell_float(row, COL_DEF, char.base_stats.def_base)
+                    char.base_stats.spd_base = cell_float(row, COL_SPD, char.base_stats.spd_base)
+
                 char.base_stats.crit_rate = cell_float(row, COL_CRIT_RATE, char.base_stats.crit_rate)
                 char.base_stats.crit_dmg = cell_float(row, COL_CRIT_DMG, char.base_stats.crit_dmg)
                 char.base_stats.break_effect = cell_float(row, COL_BREAK_EFFECT, 0.0)

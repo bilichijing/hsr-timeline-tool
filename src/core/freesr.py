@@ -319,13 +319,17 @@ def lightcone_base_stats(stats80_row: dict) -> BaseStats:
     )
 
 
-def compute_panel(
+def compute_panel_breakdown(
     char_stats80: dict,
     relics: list[FreesrRelic],
     lightcone_stats80: dict | None = None,
     skill_trees_raw: dict | None = None,
-) -> FinalStats:
-    """最终面板 = 角色 80 级基础 + 光锥基础 + 行迹/遗器加成（StatCalculator）。"""
+) -> tuple[BaseStats, StatBonus, FinalStats]:
+    """返回 (白色基础, 绿色加成, 最终面板)。
+
+    白色基础用于 HP/ATK/DEF/SPD 百分比战斗 buff 的基数；
+    绿色加成是遗器/行迹提供的 pct/flat。
+    """
     base = convert_stats80(char_stats80)
     if lightcone_stats80:
         lc = lightcone_base_stats(lightcone_stats80)
@@ -334,4 +338,17 @@ def compute_panel(
         base.def_base += lc.def_base
     bonus = calc_relic_bonus(relics)
     bonus = bonus.add(extract_trace_bonuses(skill_trees_raw))
-    return StatCalculator(base=base, bonus=bonus).final()
+    final = StatCalculator(base=base, bonus=bonus).final()
+    return base, bonus, final
+
+
+def compute_panel(
+    char_stats80: dict,
+    relics: list[FreesrRelic],
+    lightcone_stats80: dict | None = None,
+    skill_trees_raw: dict | None = None,
+) -> FinalStats:
+    """最终面板 = 角色 80 级基础 + 光锥基础 + 行迹/遗器加成（StatCalculator）。"""
+    return compute_panel_breakdown(
+        char_stats80, relics, lightcone_stats80, skill_trees_raw,
+    )[2]

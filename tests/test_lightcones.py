@@ -103,6 +103,27 @@ class TestLieFinale:
         )
         assert module.follow_up_count == 1
 
+    def test_attack_percent_buffs_use_white_base_attack(self):
+        """进战后攻击% buff 只乘白字攻击，不乘面板总攻击。"""
+        char = CharacterUnit(
+            unit_id="c1", name="c1", path="Rogue", element="Thunder", level=80,
+        )
+        char.base_stats = BaseStats(atk_base=1000, spd_base=100, energy_max=100)
+        char.bonus_stats = StatBonus(atk_pct=1.0, atk_flat=500.0)
+        char.lightcone_id = "23056"
+        char.lightcone_rank = 1
+        char.lightcone_params = list(self.PARAMS)
+        enemy = EnemyState(
+            unit_id="e1", name="木桩",
+            max_hp=100000, current_hp=100000,
+            max_toughness=100, current_toughness=100,
+            weakness_elements=["Thunder"], speed=1,
+        )
+        sim = BattleSimulator(characters=[char], enemies=[enemy])
+        sim.setup()
+        # 面板 = 1000*(1+1)+500 = 2500；影噬 +40% 只作用于白字 1000
+        assert char.final_stats().atk == pytest.approx(1000 * (1 + 1 + 0.4) + 500)
+
     def test_duplicate_vuln_does_not_stack(self):
         chars = []
         for uid in ("c1", "c2"):
