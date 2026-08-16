@@ -145,13 +145,12 @@ class AshveilModule(CharacterModule):
         lowest = self._lowest_hp_enemy(sim)
         if lowest is not None:
             self._set_bait(sim, char, lowest)
-        # 秘技进战效果：对敌方全体造成攻击力 #2 倍率雷伤，并获 #3 点充能
-        self._technique_on_battle_start(sim, char)
-
-        # 星魂常驻敌方效果初始化
+        # 星魂常驻效果先挂载，确保秘技进战伤害能吃到 E1/E6
         self._sync_e1_vulnerability(sim)
         self._sync_e6_res(sim)
         self._update_e6_dmg_buff(char)
+        # 秘技进战效果：对敌方全体造成攻击力 #2 倍率雷伤，并获 #3 点充能
+        self._technique_on_battle_start(sim, char)
 
     def on_skill_cast(
         self,

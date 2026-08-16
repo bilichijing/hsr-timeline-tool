@@ -699,3 +699,26 @@ class TestFollowUpSegments:
         assert fu_logs
         target_ids = {r.target_id for log in fu_logs for r in log.damage_records}
         assert "high" in target_ids
+
+
+class TestTechniqueWithE1:
+    def test_technique_receives_e1_vulnerability(self):
+        """E1 常驻易伤应在秘技进战伤害前生效。"""
+        char = _make_ashveil()
+        char.rank = 1
+        char.ranks_raw = {
+            "1": {"id": 150401, "name": "一魂", "desc": "易伤", "param_list": [0.24, 0.5, 0.36]},
+        }
+        enemy = EnemyState(
+            unit_id="e1", name="木桩",
+            max_hp=100000, current_hp=100000,
+            max_toughness=300, current_toughness=300,
+            weakness_elements=["Thunder"], speed=1,
+        )
+        sim = BattleSimulator(characters=[char], enemies=[enemy])
+        sim.setup()
+        tech = [l for l in sim.logs if l.action_type == "technique"][0]
+        # 1000 × 1.0 × 未击破 0.9 × 防御系数（减防 0.4）× E1 易伤 1.24
+        assert tech.total_damage == pytest.approx(
+            1000 * 1.0 * 0.9 * (100 / 160) * 1.24
+        )

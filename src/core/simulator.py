@@ -381,12 +381,11 @@ class BattleSimulator:
             # 笑点 = 欢愉角色数量
             self._grant_laugh_point(len(elation_chars))
 
+        # 光锥/遗器先进战：确保角色秘技等进战动作能吃到光锥/遗器常驻 buff。
+        self._init_lightcone_modules()
+        self._init_relic_modules()
         # 角色技能模块挂载（按 char.char_id 查注册表）
         self._init_char_modules()
-        # 光锥效果模块挂载（按 char.lightcone_id 查注册表）
-        self._init_lightcone_modules()
-        # 遗器套装效果模块挂载
-        self._init_relic_modules()
 
         # 进战速度同步：光锥/遗器的速度 buff 已挂载后，用最终速度重算行动队列。
         # 保留战前已生效的拉条比例（如翁瓦克 40% 行动提前）。
