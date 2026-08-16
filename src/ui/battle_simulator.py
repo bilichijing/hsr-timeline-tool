@@ -111,6 +111,7 @@ ACTION_NAMES_ZH: dict[str, str] = {
     "follow_up": "追加攻击",
     "technique": "秘技",
     "enemy_attack": "敌方攻击",
+    "memo_skill": "忆灵技",
 }
 
 
@@ -272,6 +273,7 @@ class _RowCharData:
     relic_set_counts: dict = field(default_factory=dict)  # {套装ID: 件数}
     relic_set_effects: dict = field(default_factory=dict)  # {套装ID: {"2": [...], "4": [...]}}
     ranks_raw: dict = field(default_factory=dict)  # nanoka ranks 原始数据（星魂描述/参数）
+    memosprite_raw: dict = field(default_factory=dict)  # nanoka memosprite 原始数据（忆灵）
 
 
 # ── 角色详情后台加载线程 ──────────────────────────────────
@@ -316,6 +318,7 @@ class _CharacterDetailWorker(QObject):
             "skills_raw": info.skills,
             "skill_trees_raw": info.skill_trees,
             "ranks_raw": info.ranks,
+            "memosprite_raw": info.memosprite,
         }
 
 
@@ -742,7 +745,7 @@ class BattleSimulatorWindow(QMainWindow):
             self.team_table.setHorizontalHeaderItem(col, item)
         header.resizeSection(COL_RANK, 72)
         self.team_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
-        self.team_table.verticalHeader().setDefaultSectionSize(30)
+        self.team_table.verticalHeader().setDefaultSectionSize(35)
         self.team_table.setAlternatingRowColors(True)
         # 固定表格高度：完整显示表头 + 4 行 + 横向滚动条，无需纵向滚动
         header_h = self.team_table.horizontalHeader().sizeHint().height()
@@ -1236,6 +1239,7 @@ class BattleSimulatorWindow(QMainWindow):
         row_data.skills_raw = payload.get("skills_raw", {})
         row_data.skill_trees_raw = payload.get("skill_trees_raw", {})
         row_data.ranks_raw = payload.get("ranks_raw", {}) or {}
+        row_data.memosprite_raw = payload.get("memosprite_raw", {}) or {}
         row_data.loaded = True
         name_item.setData(Qt.UserRole, row_data)
         # 星魂等级保持原值（freesr 可能先于详情导入），仅刷新描述 tooltip
@@ -2000,6 +2004,8 @@ class BattleSimulatorWindow(QMainWindow):
                     skill_trees_raw=None,
                     rank=rank,
                     ranks_raw=ranks_raw,
+                    memo_skill_level=self.skill_level_memo_spin.value(),
+                    memosprite_raw=row_data.memosprite_raw,
                     lightcone_id=row_data.lightcone_id,
                     lightcone_rank=row_data.lightcone_rank,
                     lightcone_params=row_data.lightcone_params,
@@ -2043,6 +2049,8 @@ class BattleSimulatorWindow(QMainWindow):
                 warnings.append(f"{name}：真实数据未就绪，使用预设技能")
             char.rank = rank
             char.ranks_raw = ranks_raw
+            char.memosprite_raw = dict(getattr(row_data, "memosprite_raw", {}) or {})
+            char.memo_skill_level = max(1, min(10, self.skill_level_memo_spin.value()))
             char.lightcone_id = getattr(row_data, "lightcone_id", "")
             char.lightcone_rank = getattr(row_data, "lightcone_rank", 1)
             char.lightcone_params = list(getattr(row_data, "lightcone_params", []) or [])

@@ -137,6 +137,8 @@ class CharacterUnit:
     lightcone_rank: int = 1            # 光锥叠影等级 1~5
     lightcone_params: list[float] = field(default_factory=list)  # 当前叠影参数
     lightcone_name: str = ""           # 装备光锥名称（展示用）
+    memosprite_raw: dict = field(default_factory=dict)  # nanoka memosprite 原始数据
+    memo_skill_level: int = 1         # 忆灵技等级（全局 SpinBox）
     relic_set_counts: dict[str, int] = field(default_factory=dict)  # {遗器套装ID: 件数}
     relic_set_effects: dict[str, dict] = field(default_factory=dict)  # {套装ID: {"2": [...], "4": [...]}}
 
@@ -1092,8 +1094,10 @@ class BattleSimulator:
         element = effect.element or char.element
         is_weakness = element in target.weakness_elements
 
-        # 基础值 = 攻击力 × 倍率（或生命/防御）
-        if effect.base_stat == "hp":
+        # 基础值 = 攻击力 × 倍率（或生命/防御/固定值）
+        if effect.fixed_base_value is not None:
+            base_value = effect.fixed_base_value
+        elif effect.base_stat == "hp":
             base_value = stats.hp * effect.multiplier
         elif effect.base_stat == "def":
             base_value = stats.defense * effect.multiplier
@@ -1381,6 +1385,25 @@ class BattleSimulator:
         self._apply_enemy_hp_damage(target, damage)
         return damage
 
+    def heal(
+        self,
+        healer: CharacterUnit,
+        target: CharacterUnit,
+        amount: float,
+    ) -> tuple[float, float]:
+        """角色治疗：返回 (实际治疗量, 计入累计治疗的原始治疗量)。
+
+        治疗乘区 = 1 + 治疗者 outgoing_heal + 受治疗者 incoming_heal；
+        实际治疗钳制到受治疗者当前生命缺口；溢出部分计入累计治疗。
+        """
+        raw = max(0.0, amount) * (
+            1.0 + healer.final_stats().outgoing_heal + target.final_stats().incoming_heal
+        )
+        missing = max(0.0, target.final_stats().hp - target.current_hp)
+        actual = min(raw, missing)
+        target.current_hp = max(0.0, min(target.final_stats().hp, target.current_hp + actual))
+        return actual, raw
+
     def make_follow_up_log(
         self,
         actor: CharacterUnit,
@@ -1568,6 +1591,8 @@ class BattleSimulator:
 
         # 配置式敌方攻击也视为一次敌方行动：光锥 debuff 回合计时
         if source is not None:
+            for module in self.char_modules.values():
+                self._dispatch_hook(module, "on_enemy_act", self, source, log)
             for owner, lc_module in self.lightcone_modules.items():
                 self._dispatch_lightcone_hook(
                     lc_module, "on_enemy_act", self, owner, source, log,

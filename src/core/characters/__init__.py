@@ -34,8 +34,10 @@ def get_module_cls(char_id: str) -> type[CharacterModule] | None:
 
 # 导入子模块触发注册（放在注册函数之后）
 from . import ashveil  # noqa: E402, F401
+from . import hyacine  # noqa: E402, F401
 from . import mortenax  # noqa: E402, F401
 from . import tribbie  # noqa: E402, F401
 from .ashveil import AshveilModule  # noqa: E402
+from .hyacine import HyacineModule  # noqa: E402
 from .mortenax import MortenaxModule  # noqa: E402
 from .tribbie import TribbieModule  # noqa: E402

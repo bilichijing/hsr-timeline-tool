@@ -108,6 +108,7 @@ class SkillEffect:
     energy_recover: float = 0.0       # 能量回复
     hits: int = 1                     # 命中次数
     element: str = ""                 # 属性（覆盖角色属性）
+    fixed_base_value: float | None = None  # 固定基础伤害（如忆灵技：累计治疗×比例）
 
 
 @dataclass

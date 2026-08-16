@@ -122,6 +122,8 @@ def build_character_unit(
     lightcone_name: str = "",
     relic_set_counts: dict[str, int] | None = None,
     relic_set_effects: dict[str, dict] | None = None,
+    memosprite_raw: dict | None = None,
+    memo_skill_level: int = 1,
 ) -> CharacterUnit:
     """构造带真实技能与面板的角色单位。
 
@@ -148,6 +150,8 @@ def build_character_unit(
         lightcone_name: 光锥名（展示）
         relic_set_counts: 遗器套装件数 {套装ID: 件数}
         relic_set_effects: 遗器套装参数 {套装ID: {"2": [...], "4": [...]}}
+        memosprite_raw: nanoka memosprite 原始数据（记忆命途角色）
+        memo_skill_level: 忆灵技等级
     """
     base = convert_stats80(stats80)
     base.energy_max = float(sp_need) if sp_need > 0 else 100.0
@@ -186,4 +190,6 @@ def build_character_unit(
         lightcone_name=lightcone_name,
         relic_set_counts=dict(relic_set_counts or {}),
         relic_set_effects={k: dict(v) for k, v in (relic_set_effects or {}).items()},
+        memosprite_raw=memosprite_raw or {},
+        memo_skill_level=max(1, min(10, int(memo_skill_level))),
     )
