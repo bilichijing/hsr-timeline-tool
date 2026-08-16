@@ -387,6 +387,22 @@ class BattleSimulator:
         self._init_lightcone_modules()
         # 遗器套装效果模块挂载
         self._init_relic_modules()
+
+        # 进战速度同步：光锥/遗器的速度 buff 已挂载后，用最终速度重算行动队列。
+        # 保留战前已生效的拉条比例（如翁瓦克 40% 行动提前）。
+        for entry in self.action_queue.entries:
+            if entry.is_monster or entry.unit_id.startswith("__enemy_attack"):
+                continue
+            char = self._get_character(entry.unit_id)
+            if char is None or entry.speed <= 0:
+                continue
+            old_base_av = AV_PER_ACTION / entry.speed
+            pull_factor = entry.current_av / old_base_av if old_base_av > 0 else 1.0
+            final_spd = char.final_stats().spd
+            if final_spd > 0:
+                entry.speed = final_spd
+                entry.current_av = (AV_PER_ACTION / final_spd) * pull_factor
+
         self.pending_av_actor = None
 
     def _grant_laugh_point(self, amount: float) -> None:

@@ -195,3 +195,26 @@ class TestTechniqueBuffExpiry:
         module.on_turn_start(sim, char)
         assert char.final_stats().hp == pytest.approx(10000)
         assert char.current_hp == pytest.approx(5000)
+
+
+class TestBattleStartAV:
+    def test_hyacine_first_av_uses_final_speed(self):
+        """风堇第一动行动值应按进战最终速度计算（10000/260≈38.46）。"""
+        char = _make_hyacine()
+        char.base_stats.spd_base = 110
+        # 光锥第一句速度 18% 已计入面板；遗器 125/320 各 +6% 由套装模块在进战挂载
+        char.bonus_stats = StatBonus(spd_pct=0.18, spd_flat=117.0)
+        char.lightcone_id = "23042"
+        char.lightcone_rank = 1
+        char.lightcone_params = [0.18, 0.01, 0, 0.18, 2, 2.5]
+        char.relic_set_counts = {"125": 4, "320": 2}
+        char.relic_set_effects = {
+            "125": {"2": [0.06], "4": [0.06, 0.15, 2]},
+            "320": {"2": [0.06, 135, 180, 0.12, 0.2]},
+        }
+        sim = _make_sim(char)
+        assert char.final_stats().spd == pytest.approx(260)
+        actor = sim.action_queue.next_actor()
+        assert actor.unit_id == "hyacine"
+        assert actor.speed == pytest.approx(260)
+        assert actor.current_av == pytest.approx(10000 / 260)
