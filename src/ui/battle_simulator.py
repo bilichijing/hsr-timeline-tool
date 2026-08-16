@@ -1016,7 +1016,9 @@ class BattleSimulatorWindow(QMainWindow):
         self.interactive_log_table.setHorizontalHeaderLabels(
             ["回合", "AV", "总行动值", "行动者", "操作", "伤害明细", "总伤害", "备注"]
         )
-        self.interactive_log_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        interactive_header = self.interactive_log_table.horizontalHeader()
+        interactive_header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        interactive_header.setStretchLastSection(True)
         self.interactive_log_table.verticalHeader().setDefaultSectionSize(32)
         self.interactive_log_table.setAlternatingRowColors(True)
         self.interactive_log_table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -1033,7 +1035,9 @@ class BattleSimulatorWindow(QMainWindow):
         self.log_table.setHorizontalHeaderLabels(
             ["回合", "AV", "总行动值", "行动者", "操作", "伤害明细", "总伤害", "备注"]
         )
-        self.log_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        log_header = self.log_table.horizontalHeader()
+        log_header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        log_header.setStretchLastSection(True)
         self.log_table.verticalHeader().setDefaultSectionSize(32)
         self.log_table.setAlternatingRowColors(True)
         layout.addWidget(self.log_table)
