@@ -25,3 +25,5 @@ from . import smith_132  # noqa: E402, F401
 from . import vonwacq_308  # noqa: E402, F401
 from . import bone_319  # noqa: E402, F401
 from . import city_326  # noqa: E402, F401
+from . import tree_320  # noqa: E402, F401
+from . import valkyrie_125  # noqa: E402, F401

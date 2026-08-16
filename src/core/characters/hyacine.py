@@ -202,8 +202,16 @@ class HyacineModule(CharacterModule):
         self._update_hp_snapshot(sim)
 
     # ── 治疗 ─────────────────────────────────────────
-    def _heal_ally(self, sim: BattleSimulator, healer: CharacterUnit, target: CharacterUnit, amount: float) -> None:
-        actual, raw = sim.heal(healer, target, amount)
+    def _heal_ally(
+        self,
+        sim: BattleSimulator,
+        healer: CharacterUnit,
+        target: CharacterUnit,
+        amount: float,
+        *,
+        source: str = "hyacine",
+    ) -> None:
+        actual, raw = sim.heal(healer, target, amount, source=source)
         self._record_healing(raw)
 
     def _heal_memosprite(self, sim: BattleSimulator, healer: CharacterUnit, amount: float) -> None:
@@ -309,11 +317,11 @@ class HyacineModule(CharacterModule):
             return
         amount = char.final_stats().hp * AUTO_HEAL_PCT + AUTO_HEAL_FLAT
         for ally in lowered:
-            self._heal_ally(sim, char, ally, amount)
+            self._heal_ally(sim, char, ally, amount, source="memosprite")
         # 雨过天晴：无论本次判定有多少目标降低，我方全体额外回复一次
         if self.sunny_turns > 0:
             for ally in sim.characters:
-                self._heal_ally(sim, char, ally, amount)
+                self._heal_ally(sim, char, ally, amount, source="memosprite")
         self._update_hp_snapshot(sim)
 
     def _talent_params(self) -> list[float]:

@@ -1390,6 +1390,8 @@ class BattleSimulator:
         healer: CharacterUnit,
         target: CharacterUnit,
         amount: float,
+        *,
+        source: str = "skill",
     ) -> tuple[float, float]:
         """角色治疗：返回 (实际治疗量, 计入累计治疗的原始治疗量)。
 
@@ -1402,6 +1404,12 @@ class BattleSimulator:
         missing = max(0.0, target.final_stats().hp - target.current_hp)
         actual = min(raw, missing)
         target.current_hp = max(0.0, min(target.final_stats().hp, target.current_hp + actual))
+        # 通知治疗者穿戴的遗器套装
+        for relic_module in self.relic_modules.get(healer.unit_id, []):
+            self._dispatch_relic_hook(
+                relic_module, "on_heal",
+                self, healer, healer, target, amount, raw, actual, source,
+            )
         return actual, raw
 
     def make_follow_up_log(

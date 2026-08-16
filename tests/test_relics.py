@@ -49,6 +49,8 @@ class TestRegistry:
         ("308", "VonwacqModule"),
         ("319", "BoneModule"),
         ("326", "CityModule"),
+        ("125", "ValkyrieModule"),
+        ("320", "TreeModule"),
     ])
     def test_registered(self, set_id, cls_name):
         assert get_module_cls(set_id).__name__ == cls_name
@@ -131,3 +133,30 @@ class TestCity:
         assert char.final_stats().crit_dmg == pytest.approx(0.5 + 0.12)
         module.on_enemy_dead(sim, char, enemy)
         assert char.final_stats().crit_dmg == pytest.approx(0.5 + 0.12)
+
+
+class TestValkyrie:
+    def test_ganlin_from_memosprite_heal(self):
+        """125：装备者/忆灵治疗其他我方目标后获得甘霖。"""
+        char, sim = _make_owner("125", {"2": [0.06], "4": [0.06, 0.15, 2]}, count=4)
+        module = _relic_module(sim)
+        ally = CharacterUnit(unit_id="ally", name="队友", path="Rogue", element="Thunder", level=80)
+        ally.base_stats = BaseStats(hp_base=5000, spd_base=100)
+        module.on_heal(sim, char, char, ally, 100, 100, 100, "memosprite")
+        assert module.can_grant is False
+        # 基础 2 件速度 6% + 甘霖速度 6%，最终 +12%
+        assert char.final_stats().spd == pytest.approx(100 * 1.12)
+        assert char.final_stats().crit_dmg == pytest.approx(0.5 + 0.15)
+        # 风堇回合开始后可再次触发
+        module.on_turn_start(sim, char)
+        assert module.can_grant is True
+
+
+class TestTree:
+    def test_heal_bonus_by_speed_threshold(self):
+        """320：速度达到阈值时提高装备者/忆灵治疗量。"""
+        char, sim = _make_owner("320", {"2": [0.06, 135, 180, 0.12, 0.2]}, count=2, spd=150)
+        assert char.final_stats().outgoing_heal == pytest.approx(0.12)
+        char.base_stats.spd_base = 200
+        _relic_module(sim).on_turn_start(sim, char)
+        assert char.final_stats().outgoing_heal == pytest.approx(0.20)

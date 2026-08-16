@@ -31,6 +31,19 @@ class RelicSetModule:
     def on_turn_end(self, sim: BattleSimulator, owner: CharacterUnit) -> None:
         """装备者回合结束。"""
 
+    def on_heal(
+        self,
+        sim: BattleSimulator,
+        owner: CharacterUnit,
+        healer: CharacterUnit,
+        target: CharacterUnit,
+        amount: float,
+        raw: float,
+        actual: float,
+        source: str,
+    ) -> None:
+        """装备者提供治疗（sim.heal 结算后）。"""
+
     def on_skill_cast(
         self,
         sim: BattleSimulator,
