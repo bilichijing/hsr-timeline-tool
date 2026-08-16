@@ -319,6 +319,34 @@ def lightcone_base_stats(stats80_row: dict) -> BaseStats:
     )
 
 
+# 光锥“第一句话”常驻面板加成：{光锥ID: (StatBonus字段, 参数序号)}
+LIGHTCONE_PANEL_BONUS_MAP: dict[str, tuple[str, int]] = {
+    "23056": ("crit_rate", 1),   # 一场谎言的终幕：暴击率提高
+    "23059": ("hp_pct", 1),      # 灼尽炼狱的新骸：生命上限提高
+    "23038": ("crit_dmg", 1),    # 如果时间是一朵花：暴击伤害提高
+    "23042": ("spd_pct", 1),     # 愿虹光永驻天空：速度提高
+}
+
+
+def apply_lightcone_panel_bonus(
+    base: BaseStats,
+    bonus: StatBonus,
+    lightcone_id: str,
+    lightcone_params: list[float],
+) -> FinalStats:
+    """把光锥第一句“使装备者 xx 提高 xx%”的常驻加成写入局外面板。
+
+    注意：这里会直接修改传入的 bonus，调用方应把它作为面板绿字保存，
+    以便战斗模拟不再重复挂载该常驻 buff。
+    """
+    entry = LIGHTCONE_PANEL_BONUS_MAP.get(str(lightcone_id))
+    if entry is not None and lightcone_params:
+        field, index = entry
+        if 1 <= index <= len(lightcone_params):
+            setattr(bonus, field, getattr(bonus, field) + float(lightcone_params[index - 1]))
+    return StatCalculator(base=base, bonus=bonus).final()
+
+
 def compute_panel_breakdown(
     char_stats80: dict,
     relics: list[FreesrRelic],

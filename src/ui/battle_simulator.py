@@ -63,7 +63,7 @@ from src.core.character_factory import (
 )
 from src.core.buff import BuffDuration
 from src.core.damage import DamageType, build_enemy_resistance
-from src.core.freesr import compute_panel, compute_panel_breakdown, lightcone_base_stats, parse_freesr
+from src.core.freesr import apply_lightcone_panel_bonus, compute_panel, compute_panel_breakdown, lightcone_base_stats, parse_freesr
 from src.core.stats import StatCalculator
 from src.core.simulator import (
     BattleEndReason,
@@ -1649,6 +1649,11 @@ class BattleSimulatorWindow(QMainWindow):
                 profile.relics.get(char_id, []),
                 lc_stats80,
                 row_data.skill_trees_raw,
+            )
+            # 光锥第一句“使装备者 xx 提高”的常驻加成写入局外面板
+            final = apply_lightcone_panel_bonus(
+                white_base, green_bonus,
+                row_data.lightcone_id, row_data.lightcone_params,
             )
             row_data.panel_white_base = {
                 "hp": white_base.hp_base,

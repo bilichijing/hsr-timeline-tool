@@ -46,12 +46,7 @@ class RainbowSkyModule(LightconeModule):
         self.consumed_total = 0.0
         self.vuln_contribution = 0.0
         self.vuln_turns = 0
-        owner.buff_mgr.add(Buff(
-            id=SPEED_BUFF_ID, name="包容·速度", stat="spd_pct",
-            value=_param(owner, 1, 0.18),
-            duration_type=BuffDuration.PERMANENT, duration_count=-1,
-            source_unit=owner.unit_id, stack_rule=StackRule.NO_STACK_SAME_NAME,
-        ))
+        # 第一句“速度提高”已计入局外面板，不在战斗中重复挂载
 
     def on_skill_cast(
         self,

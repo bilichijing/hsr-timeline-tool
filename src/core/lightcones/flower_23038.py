@@ -46,17 +46,7 @@ class FlowerOfTimeModule(LightconeModule):
         self.owner_unit_id = owner.unit_id
         self.oracle_active = False
         self._counted_tokens = set()
-
-        owner.buff_mgr.add(Buff(
-            id=OWNER_CRIT_BUFF_ID,
-            name="希冀·暴击伤害",
-            stat="crit_dmg",
-            value=_param(owner, 1, 0.36),
-            duration_type=BuffDuration.PERMANENT,
-            duration_count=-1,
-            source_unit=owner.unit_id,
-            stack_rule=StackRule.NO_STACK_SAME_NAME,
-        ))
+        # 第一句“暴击伤害提高”已计入局外面板，不在战斗中重复挂载
         sim.recover_energy(owner, _param(owner, 5, 21))
         self._grant_oracle(sim, owner, turns=int(_param(owner, 6, 2)))
 

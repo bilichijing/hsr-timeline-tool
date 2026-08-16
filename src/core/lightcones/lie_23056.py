@@ -51,17 +51,7 @@ class LieFinaleModule(LightconeModule):
         self.vuln_contribution = 0.0
         self.vuln_param = _param(owner, 5, 0.20)
         self._counted_tokens = set()
-
-        owner.buff_mgr.add(Buff(
-            id=CRIT_BUFF_ID,
-            name="吞没·暴击率",
-            stat="crit_rate",
-            value=_param(owner, 1, 0.18),
-            duration_type=BuffDuration.PERMANENT,
-            duration_count=-1,
-            source_unit=owner.unit_id,
-            stack_rule=StackRule.NO_STACK_SAME_NAME,
-        ))
+        # 第一句“暴击率提高”已计入局外面板，不在战斗中重复挂载
         self._grant_shadow(sim, owner)
 
     def on_turn_start(self, sim: BattleSimulator, owner: CharacterUnit) -> None:

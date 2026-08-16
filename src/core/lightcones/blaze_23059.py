@@ -48,18 +48,7 @@ class BlazeRebornModule(LightconeModule):
         self.owner_unit_id = owner.unit_id
         self.energy_triggered = False
         self.targets = {}
-        owner.buff_mgr.add(Buff(
-            id=HP_BUFF_ID,
-            name="淬炼·生命上限",
-            stat="hp_pct",
-            value=_param(owner, 1, 0.30),
-            duration_type=BuffDuration.PERMANENT,
-            duration_count=-1,
-            source_unit=owner.unit_id,
-            stack_rule=StackRule.NO_STACK_SAME_NAME,
-        ))
-        # 永久生命上限在 setup() 期间挂载，同步刷新当前生命为满血
-        owner.current_hp = owner.final_stats().hp
+        # 第一句“生命上限提高”已计入局外面板，不在战斗中重复挂载
 
     def on_turn_start(self, sim: BattleSimulator, owner: CharacterUnit) -> None:
         if self.energy_triggered:

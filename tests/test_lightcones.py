@@ -62,7 +62,9 @@ class TestLieFinale:
     def test_battle_start_shadow(self):
         char, sim = _make_owner("23056", self.PARAMS)
         module = sim.lightcone_modules[char.unit_id]
-        assert char.final_stats().crit_rate == pytest.approx(0.05 + 0.18)
+        # 暴击率常驻已计入局外面板，战斗中不再重复挂载
+        assert char.final_stats().crit_rate == pytest.approx(0.05)
+        assert not any(b.id == "lc23056_crit_rate" for b in char.buff_mgr.buffs)
         assert any(b.id == "lc23056_shadow_atk" for b in char.buff_mgr.buffs)
         assert module.shadow_active
         assert sim.enemies[0].vulnerability == pytest.approx(0.2)
@@ -155,7 +157,8 @@ class TestBlazeReborn:
     def test_hp_and_energy_once(self):
         char, sim = _make_owner("23059", self.PARAMS)
         module = sim.lightcone_modules[char.unit_id]
-        assert char.final_stats().hp == pytest.approx(5000 * 1.3)
+        # 生命上限常驻已计入局外面板，战斗中不再重复挂载
+        assert char.final_stats().hp == pytest.approx(5000)
         char.energy = 0
         module.on_turn_start(sim, char)
         assert char.energy == 20
@@ -186,7 +189,8 @@ class TestFlowerOfTime:
         char, sim = _make_owner("23038", self.PARAMS)
         module = sim.lightcone_modules[char.unit_id]
         assert char.energy == pytest.approx(21)
-        assert char.final_stats().crit_dmg == pytest.approx(0.5 + 0.36 + 0.48)
+        # 装备者暴伤常驻已计入局外面板；这里只验证全队谕示暴伤
+        assert char.final_stats().crit_dmg == pytest.approx(0.5 + 0.48)
         assert module.oracle_active
 
     def test_follow_up_energy_and_refresh(self):
@@ -203,6 +207,22 @@ class TestFlowerOfTime:
             sim, char, char, SkillType.FOLLOW_UP, enemy, 100, None, 1,
         )
         assert char.energy == pytest.approx(before + 12)
+
+
+class TestPanelFirstSentence:
+    def test_lightcone_panel_bonus(self):
+        """光锥第一句常驻加成写入局外面板，且不重复进战斗。"""
+        from src.core.freesr import apply_lightcone_panel_bonus
+        from src.core.stats import BaseStats, StatBonus
+
+        base = BaseStats(hp_base=1000, atk_base=1000, spd_base=100,
+                         crit_rate=0.05, crit_dmg=0.5)
+        bonus = StatBonus()
+        final = apply_lightcone_panel_bonus(
+            base, bonus, "23056", [0.18, 4, 3, 0.4, 0.2],
+        )
+        assert bonus.crit_rate == pytest.approx(0.18)
+        assert final.crit_rate == pytest.approx(0.05 + 0.18)
 
 
 class TestRainbowSky:
