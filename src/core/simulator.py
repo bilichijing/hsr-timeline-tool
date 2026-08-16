@@ -1104,7 +1104,7 @@ class BattleSimulator:
         def_ctx = DefenseContext(
             attacker_level=char.level,
             defender_level=target.level,
-            defender_defense=0,  # 怪物防御暂未建模
+            defender_defense=0,  # 角色攻击敌人：防御乘区仅由敌方等级决定
             def_reduce=target.def_reduce,
         )
 
