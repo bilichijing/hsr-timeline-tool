@@ -60,6 +60,7 @@ class BaseStats:
     laugh_point: float = 0.0      # 笑点
     good_joke: float = 0.0        # 好活当赏
     follow_up_dmg_bonus: float = 0.0  # 追加攻击伤害提高（遗器等）
+    follow_up_crit_dmg_bonus: float = 0.0  # 追加攻击暴击伤害额外提高
     elemental_dmg_bonus: dict[str, float] = field(default_factory=dict)  # 分属性增伤
 
 
@@ -99,6 +100,7 @@ class StatBonus:
     laugh_point: float = 0.0
     good_joke: float = 0.0
     follow_up_dmg_bonus: float = 0.0  # 追加攻击伤害提高
+    follow_up_crit_dmg_bonus: float = 0.0  # 追加攻击暴击伤害额外提高
     elemental_dmg_bonus: dict[str, float] = field(default_factory=dict)  # 分属性增伤
 
     def add(self, other: StatBonus) -> StatBonus:
@@ -154,6 +156,7 @@ class FinalStats:
     incoming_heal: float = 0.0     # 受到治疗提高（小数；治疗模型接入时使用）
     res_pen: float = 0.0           # 全属性抗性穿透（小数）
     follow_up_dmg_bonus: float = 0.0  # 追加攻击伤害提高
+    follow_up_crit_dmg_bonus: float = 0.0  # 追加攻击暴击伤害额外提高
     elemental_dmg_bonus: dict[str, float] = field(default_factory=dict)  # 分属性增伤
 
 
@@ -192,6 +195,7 @@ class StatCalculator:
             incoming_heal=b.incoming_heal + s.incoming_heal,
             res_pen=b.res_pen + s.res_pen,
             follow_up_dmg_bonus=b.follow_up_dmg_bonus + s.follow_up_dmg_bonus,
+            follow_up_crit_dmg_bonus=b.follow_up_crit_dmg_bonus + s.follow_up_crit_dmg_bonus,
             elemental_dmg_bonus=dict(s.elemental_dmg_bonus),
             energy_max=b.energy_max,
             aggro=b.aggro,

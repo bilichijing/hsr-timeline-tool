@@ -722,3 +722,28 @@ class TestTechniqueWithE1:
         assert tech.total_damage == pytest.approx(
             1000 * 1.0 * 0.9 * (100 / 160) * 1.24
         )
+
+
+class TestHeadwolfTrace:
+    def test_headwolf_aura_crit_and_follow_up_crit(self):
+        """头狼：我方全体暴伤+40%，追加攻击暴伤额外+80%。"""
+        char = _make_ashveil()
+        char.skill_trees_raw = {
+            "group": {
+                "point": {
+                    "point_type": 3,
+                    "point_name": "头狼",
+                    "param_list": [0.4, 0.8],
+                },
+            },
+        }
+        enemy = EnemyState(
+            unit_id="e1", name="木桩",
+            max_hp=100000, current_hp=100000,
+            max_toughness=300, current_toughness=300,
+            weakness_elements=["Thunder"], speed=1,
+        )
+        sim = BattleSimulator(characters=[char], enemies=[enemy])
+        sim.setup()
+        assert char.final_stats().crit_dmg == pytest.approx(0.5 + 0.4)
+        assert char.final_stats().follow_up_crit_dmg_bonus == pytest.approx(0.8)

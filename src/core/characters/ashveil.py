@@ -87,6 +87,8 @@ class AshveilModule(CharacterModule):
     e6_dmg_per_greed: float = 0.0    # E6：每层婪酣增伤
     e6_max_stacks: int = 30
     greed_gained_total: int = 0      # E6：整场战斗累计获得过的婪酣层数
+    trace_headwolf_crit: float = 0.0        # 头狼：我方全体暴击伤害提高
+    trace_headwolf_follow_crit: float = 0.0 # 头狼：我方追加攻击暴击伤害额外提高
 
     # 已处理天赋的受击行动令牌集合（按行动计：一次攻击行动的多段命中
     # 只触发一次"固定回 8 能量 + 追击判定"，避免战技 5 段回 5 次）。
@@ -141,6 +143,7 @@ class AshveilModule(CharacterModule):
         self._e1_vuln_contrib = {}
         self._e6_res_original = {}
         self.greed_gained_total = 0
+        self._read_headwolf_trace(sim, char)
         # 战斗开始：当前场上生命值最低的敌方单体成为饲饵
         lowest = self._lowest_hp_enemy(sim)
         if lowest is not None:
@@ -416,6 +419,49 @@ class AshveilModule(CharacterModule):
         self.greed = min(greed_before + greed_gain, self.greed_cap)
         self.greed_gained_total += self.greed - greed_before
         self._update_e6_dmg_buff(char)
+
+    def _read_headwolf_trace(self, sim: BattleSimulator, char: CharacterUnit) -> None:
+        """头狼：我方全体暴击伤害提高；我方追加攻击暴击伤害额外提高。"""
+        self.trace_headwolf_crit = 0.0
+        self.trace_headwolf_follow_crit = 0.0
+        for group in char.skill_trees_raw.values():
+            if not isinstance(group, dict):
+                continue
+            for point in group.values():
+                if not isinstance(point, dict) or point.get("point_type") != 3:
+                    continue
+                if point.get("point_name") != "头狼":
+                    continue
+                params = point.get("param_list") or []
+                if len(params) >= 1:
+                    self.trace_headwolf_crit = float(params[0])
+                if len(params) >= 2:
+                    self.trace_headwolf_follow_crit = float(params[1])
+                break
+        if self.trace_headwolf_crit <= 0:
+            return
+        for ally in sim.characters:
+            ally.buff_mgr.add(Buff(
+                id="ashveil_headwolf_crit",
+                name="头狼·暴击伤害",
+                stat="crit_dmg",
+                value=self.trace_headwolf_crit,
+                duration_type=BuffDuration.PERMANENT,
+                duration_count=-1,
+                source_unit=char.unit_id,
+                stack_rule=StackRule.NO_STACK_SAME_NAME,
+            ))
+            if self.trace_headwolf_follow_crit > 0:
+                ally.buff_mgr.add(Buff(
+                    id="ashveil_headwolf_follow_crit",
+                    name="头狼·追加暴伤",
+                    stat="follow_up_crit_dmg_bonus",
+                    value=self.trace_headwolf_follow_crit,
+                    duration_type=BuffDuration.PERMANENT,
+                    duration_count=-1,
+                    source_unit=char.unit_id,
+                    stack_rule=StackRule.NO_STACK_SAME_NAME,
+                ))
 
     def _e1_vuln_for(self, enemy: EnemyState) -> float:
         """E1：目标当前生命值百分比 ≤ 阈值时使用更高易伤。"""

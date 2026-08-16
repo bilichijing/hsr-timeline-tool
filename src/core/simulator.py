@@ -1157,7 +1157,8 @@ class BattleSimulator:
             # 目标“受到暴击伤害提高”已接到 crit_dmg 字段（当前 is_crit=False，供未来暴击结算）
             crit_dmg=stats.crit_dmg
             + target.crit_dmg_taken
-            + target.crit_dmg_taken_by_unit.get(char.unit_id, 0.0),
+            + target.crit_dmg_taken_by_unit.get(char.unit_id, 0.0)
+            + (stats.follow_up_crit_dmg_bonus if skill_type == SkillType.FOLLOW_UP else 0.0),
             break_effect=stats.break_effect,
             toughness_max=target.max_toughness,
             actual_toughness_reduced=effect.toughness_damage,
