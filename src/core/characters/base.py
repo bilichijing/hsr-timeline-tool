@@ -28,8 +28,11 @@ class CharacterModule:
 
     # ── 事件钩子（按需覆盖）──────────────────────────────
 
+    def on_battle_start_setup(self, sim: BattleSimulator, char: CharacterUnit) -> None:
+        """战斗开始·第一阶段：全队光环/常驻 buff/治疗/能量等，先于进战伤害生效。"""
+
     def on_battle_start(self, sim: BattleSimulator, char: CharacterUnit) -> None:
-        """战斗开始（setup() 末尾，模块实例化后）。"""
+        """战斗开始·第二阶段：进战动作（如秘技伤害）。"""
 
     def on_turn_start(self, sim: BattleSimulator, char: CharacterUnit) -> None:
         """角色回合开始（预留）。"""

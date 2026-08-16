@@ -1201,9 +1201,15 @@ class BattleSimulator:
             if cls is None:
                 continue
             self.char_modules[char.unit_id] = cls()
-        # 逆序触发进战，让后排辅助（缇宝、风堇等）的光环/buff 先挂上，
-        # 再执行前排输出角色的秘技/进战伤害。
-        for char in reversed(self.characters):
+        # 两阶段进战：
+        # 1. 所有角色先执行 on_battle_start_setup（光环/常驻/治疗/能量）
+        # 2. 再执行 on_battle_start（秘技伤害等进战动作）
+        # 这样无论队伍站位如何，秘技都能吃到全队进战 buff。
+        for char in self.characters:
+            module = self.char_modules.get(char.unit_id)
+            if module is not None:
+                self._dispatch_hook(module, "on_battle_start_setup", self, char)
+        for char in self.characters:
             module = self.char_modules.get(char.unit_id)
             if module is not None:
                 self._dispatch_hook(module, "on_battle_start", self, char)

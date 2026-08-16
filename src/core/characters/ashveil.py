@@ -98,7 +98,7 @@ class AshveilModule(CharacterModule):
 
     # ── 事件钩子 ─────────────────────────────────────────
 
-    def on_battle_start(self, sim: BattleSimulator, char: CharacterUnit) -> None:
+    def on_battle_start_setup(self, sim: BattleSimulator, char: CharacterUnit) -> None:
         self.unit_id = char.unit_id
         talent = get_skill_by_type(char.skills, SkillType.TALENT)
         self.charge = module_params(talent, 1, 2)  # 初始充能 #1
@@ -152,7 +152,9 @@ class AshveilModule(CharacterModule):
         self._sync_e1_vulnerability(sim)
         self._sync_e6_res(sim)
         self._update_e6_dmg_buff(char)
-        # 秘技进战效果：对敌方全体造成攻击力 #2 倍率雷伤，并获 #3 点充能
+
+    def on_battle_start(self, sim: BattleSimulator, char: CharacterUnit) -> None:
+        """进战动作：秘技伤害与秘技充能。"""
         self._technique_on_battle_start(sim, char)
 
     def on_skill_cast(

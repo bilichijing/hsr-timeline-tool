@@ -125,7 +125,7 @@ class TribbieModule(CharacterModule):
 
     # ── 事件钩子 ─────────────────────────────────────────
 
-    def on_battle_start(self, sim: BattleSimulator, char: CharacterUnit) -> None:
+    def on_battle_start_setup(self, sim: BattleSimulator, char: CharacterUnit) -> None:
         self.unit_id = char.unit_id
         self.field_turns = 0
         self.vuln_contribution = 0.0

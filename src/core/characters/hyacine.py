@@ -76,7 +76,7 @@ class HyacineModule(CharacterModule):
     _hp_snapshot: dict[str, float] = {}
 
     # ── 战斗开始 ─────────────────────────────────────
-    def on_battle_start(self, sim: BattleSimulator, char: CharacterUnit) -> None:
+    def on_battle_start_setup(self, sim: BattleSimulator, char: CharacterUnit) -> None:
         self.unit_id = char.unit_id
         self.memosprite_alive = False
         self.memosprite_max_hp = 0.0

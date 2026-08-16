@@ -138,7 +138,7 @@ class MortenaxModule(CharacterModule):
 
     # ── 事件钩子 ─────────────────────────────────────────
 
-    def on_battle_start(self, sim: BattleSimulator, char: CharacterUnit) -> None:
+    def on_battle_start_setup(self, sim: BattleSimulator, char: CharacterUnit) -> None:
         self.unit_id = char.unit_id
         self.rage = False
         self.charge = 0.0
