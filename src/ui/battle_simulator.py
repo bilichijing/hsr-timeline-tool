@@ -2048,6 +2048,8 @@ class BattleSimulatorWindow(QMainWindow):
                     relic_set_counts=row_data.relic_set_counts,
                     relic_set_effects=row_data.relic_set_effects,
                 )
+                # 行迹原始数据要交给角色模块读取（如不死途“头狼”额外能力）
+                char.skill_trees_raw = row_data.skill_trees_raw
                 # HP/ATK/DEF/SPD 使用“白字基础 + 绿字加成”拆分，
                 # 保证进战后百分比攻击/生命/防御/速度 buff 只乘白字基础。
                 white = row_data.panel_white_base or {}
