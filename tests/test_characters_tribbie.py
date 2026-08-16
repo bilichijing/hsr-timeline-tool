@@ -684,3 +684,19 @@ class TestEidolons:
         # 天赋追击会触发 1 段结界附加伤害（不吃 E6 增伤）
         added_damage = _dmg(hp, EXTRA_MULT, 1 + FIELD_VULN)
         assert follow_ups[0].total_damage == pytest.approx(talent_damage + added_damage)
+
+
+class TestA2Dynamic:
+    def test_a2_hp_recalculated_when_ally_max_hp_changes(self):
+        """A2 行迹：结界期间生命上限随我方 HP 上限变化动态重算。"""
+        char = _make_tribbie()
+        ally = _make_ally()
+        sim = _make_sim(char, ally)
+        _ultra(sim, "tribbie")
+        module = _module(sim)
+        # 初始：缇宝 10000 + 队友 5000 → A2 增加 1350
+        assert char.final_stats().hp == pytest.approx(10000 + (10000 + 5000) * A2_RATIO)
+        # 队友生命上限提高 3000，动态重算后应同步变化
+        ally.base_stats.hp_base += 3000
+        module._sync_a2_hp(sim, char)
+        assert char.final_stats().hp == pytest.approx(10000 + (10000 + 8000) * A2_RATIO)

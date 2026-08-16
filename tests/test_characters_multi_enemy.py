@@ -82,9 +82,10 @@ class TestMortenaxMultiEnemy:
         sim, enemies = _mortenax_sim(2, broken=False)
         _open_rage_freeze(sim)
         sim.step(PlayerAction(unit_id="mortenax", skill_type=SkillType.SKILL, target_id="e1"))
-        # show_stance_list[0] = 15，全体两敌各削 15 韧性
-        assert enemies[0].current_toughness == pytest.approx(85)
-        assert enemies[1].current_toughness == pytest.approx(85)
+        # 全体首段各削 10；后续 4 次弹射各削 5。
+        # 两敌总削韧 = 2×10 + 4×5 = 40。
+        assert all(e.current_toughness <= 90 for e in enemies)
+        assert sum(e.current_toughness for e in enemies) == pytest.approx(200 - 40)
 
     def test_skill_aoe_applies_blaze_to_each_enemy(self):
         """全体攻击命中谁就给谁上煞火缠身，充能仍按行动只计 1 点。"""

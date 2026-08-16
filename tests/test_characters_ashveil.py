@@ -89,7 +89,7 @@ def _make_ashveil() -> CharacterUnit:
     )
     from src.core.stats import BaseStats, StatBonus
 
-    char.base_stats = BaseStats(atk_base=1000, spd_base=100, energy_max=100)
+    char.base_stats = BaseStats(atk_base=1000, spd_base=100, energy_max=100, crit_rate=0.0)
     char.bonus_stats = StatBonus()
     char.skills = parse_all_skills(_ashveil_skills_raw(), level=10, ultra_energy_cost=150)
     return char
@@ -273,13 +273,13 @@ class TestTalentTrigger:
         assert len(follow_ups) == 1
         log = follow_ups[0]
         assert log.target_id == "enemy_a"
-        # 双维度：技能类型 FOLLOW_UP × 伤害类型 NORMAL
-        assert len(log.damage_records) == 1
-        assert log.damage_records[0].skill_type == SkillType.FOLLOW_UP
-        assert log.damage_records[0].damage_type.value == "normal"
-        # 伤害 = 1000 × 天赋 #4（L10 = 2.0）× 未击破减伤 0.9
-        #         × 防御系数（80级 vs 80级，饲饵存在时敌方减防 0.4 已生效）
+        # 一次追击分 10 段：双维度均为 FOLLOW_UP × NORMAL
+        assert len(log.damage_records) == 10
+        assert all(r.skill_type == SkillType.FOLLOW_UP for r in log.damage_records)
+        assert all(r.damage_type.value == "normal" for r in log.damage_records)
+        # 每段倍率 = 总倍率 / 10；总伤害与 10 段之和一致
         assert log.total_damage == pytest.approx(1000 * 2.0 * 0.9 * 100 / 160)
+        assert sum(r.value for r in log.damage_records) == pytest.approx(log.total_damage)
 
     def test_charge_consumed_and_greed_gained(self):
         sim = _make_battle()
@@ -648,3 +648,54 @@ class TestEidolons:
         module.greed_gained_total = 40
         module._update_e6_dmg_buff(char)
         assert char.final_stats().dmg_bonus == pytest.approx(0.04 * 30)  # 封顶 30 层
+
+
+class TestFollowUpSegments:
+    def test_follow_up_10_segments_total_toughness_5(self):
+        """一次追击 10 段，合计削韧 5（每段 0.5）。"""
+        char = _make_ashveil()
+        enemy = EnemyState(
+            unit_id="e1", name="木桩",
+            max_hp=100000, current_hp=100000,
+            max_toughness=300, current_toughness=300,
+            weakness_elements=["Thunder"], speed=1,
+        )
+        sim = BattleSimulator(characters=[char], enemies=[enemy])
+        sim.setup()
+        module = sim.char_modules[char.unit_id]
+        module._follow_up_attack(
+            sim, char, enemy, multiplier=2.0,
+            notes="天赋追击", energy_recover=0,
+        )
+        assert enemy.current_toughness == pytest.approx(300 - 5)
+        follow_up = [l for l in sim.logs if l.notes == "天赋追击"][-1]
+        assert len(follow_up.damage_records) == 10
+
+    def test_fatal_attack_transfer(self):
+        """终结技强化追击击杀饲饵后，剩余段与后续追击转移新饲饵。"""
+        char = _make_ashveil()
+        low = EnemyState(
+            unit_id="low", name="残血怪",
+            max_hp=1000, current_hp=1000,
+            max_toughness=300, current_toughness=300,
+            weakness_elements=["Thunder"], speed=1,
+        )
+        high = EnemyState(
+            unit_id="high", name="满血怪",
+            max_hp=100000, current_hp=100000,
+            max_toughness=300, current_toughness=300,
+            weakness_elements=["Thunder"], speed=1,
+        )
+        sim = BattleSimulator(characters=[char], enemies=[low, high])
+        sim.setup()
+        module = sim.char_modules[char.unit_id]
+        assert module.bait_unit_id == "low"
+        module.greed = 4  # 触发一次强化追击 + 一次婪酣追击
+        ultra = next(s for s in char.skills.values() if s.id == "150403")
+        module.on_skill_end(sim, char, ultra, None, low, None)
+        assert low.is_dead
+        assert high.current_hp < high.max_hp
+        fu_logs = [l for l in sim.logs if l.action_type == "follow_up"]
+        assert fu_logs
+        target_ids = {r.target_id for log in fu_logs for r in log.damage_records}
+        assert "high" in target_ids

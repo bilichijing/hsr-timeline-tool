@@ -21,8 +21,12 @@
   #6 婪酣上限（12）、#7 回能量（8）
 - 150407 秘技：战前机制，不建模
 
+已实现：
+- 一次追击分为 10 段伤害；10 段合计削韧 5（每段 0.5）。
+- 终结技强化追击/婪酣追击的致命攻击转移：击杀饲饵后继续攻击新饲饵。
+
 未建模（TODO）：
-- 终结技强化追击"致命攻击转移"（击杀饲饵后转移到新饲饵继续打）
+- 暂无其他追加攻击削韧明细。
 """
 
 from __future__ import annotations
@@ -229,16 +233,26 @@ class AshveilModule(CharacterModule):
         mult = module_params(ultra, 4, 1.0)
         follow_up_recover = talent.energy_recover
         self._follow_up_attack(
-            sim, char, target, mult, notes="强化追击", energy_recover=follow_up_recover
+            sim, char, target, mult,
+            notes="强化追击", energy_recover=follow_up_recover,
+            transfer_on_kill=True,
         )
 
         # 每消耗 #3 层婪酣额外 1 段（#4 倍率）
         # 婪酣额外攻击不提供追加攻击回能（用户实测校准）
+        # 致命攻击转移：目标被击杀后，剩余追击继续攻击新饲饵。
         greed_cost = int(module_params(ultra, 3, 4))
         greed_before = self.greed
         while self.greed >= greed_cost:
             self.greed -= greed_cost
-            self._follow_up_attack(sim, char, target, mult, notes="婪酣追击", energy_recover=0)
+            current_target = self._bait(sim) or target
+            if current_target is None:
+                break
+            self._follow_up_attack(
+                sim, char, current_target, mult,
+                notes="婪酣追击", energy_recover=0,
+                transfer_on_kill=True,
+            )
         # E2：强化天赋追加攻击后，返还本次移除婪酣层数的 #2
         removed = greed_before - self.greed
         if self.e2_return_rate > 0 and removed > 0:
@@ -246,8 +260,6 @@ class AshveilModule(CharacterModule):
             self.greed = min(self.greed_cap, self.greed + refund)
             self.greed_gained_total += refund
             self._update_e6_dmg_buff(char)
-        # TODO: 致命攻击转移未建模：
-        #   追击击杀饲饵后应转移到新饲饵继续打，直至婪酣 < #3 层。
 
     def on_enemy_dead(self, sim: BattleSimulator, enemy: EnemyState) -> None:
         """饲饵死亡：转移到当前生命值最低的存活敌人（无存活则清除饲饵与减防）。"""
@@ -499,22 +511,37 @@ class AshveilModule(CharacterModule):
         multiplier: float,
         notes: str,
         energy_recover: float = 0.0,
+        transfer_on_kill: bool = False,
     ) -> None:
-        """打一段追加攻击（独立日志，不推进队列）。
+        """打一次追加攻击（一次追击分为 10 段，独立日志，不推进队列）。
 
-        energy_recover: 本次追击的能量回复（追加攻击回能 5；婪酣额外段为 0）。
+        用户确认：一次追击分 10 段造成伤害，10 段合计削韧为 5，
+        因此每段伤害倍率 = 总倍率 / 10，每段削韧 = 0.5。
+
+        transfer_on_kill: 终结技强化追击的“致命攻击转移”——某段击杀饲饵后，
+        剩余段与后续婪酣追击继续攻击新饲饵。
         """
         if target is None or multiplier <= 0:
             return
         log = sim.make_follow_up_log(char, target, notes=notes)
-        effect = SkillEffect(
-            damage_type=DamageType.NORMAL,
-            multiplier=multiplier,
-            # TODO: 追加攻击削韧数据待勘探（天赋追击 15，强化追击未单独给出）
-            toughness_damage=0,
-            element=ELEMENT,
-        )
-        sim.deal_damage(char, target, effect, skill_type=SkillType.FOLLOW_UP, log=log)
+        segment_multiplier = multiplier / 10.0
+        segment_toughness = 5.0 / 10.0
+        current_target = target
+        for _ in range(10):
+            if current_target is None or current_target.is_dead:
+                current_target = self._bait(sim) if transfer_on_kill else None
+            if current_target is None:
+                break
+            effect = SkillEffect(
+                damage_type=DamageType.NORMAL,
+                multiplier=segment_multiplier,
+                toughness_damage=segment_toughness,
+                element=ELEMENT,
+            )
+            sim.deal_damage(
+                char, current_target, effect,
+                skill_type=SkillType.FOLLOW_UP, log=log,
+            )
         # 追加攻击回能（走能量恢复效率乘区）
         if energy_recover:
             sim.recover_energy(char, energy_recover)

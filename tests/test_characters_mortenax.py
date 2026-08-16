@@ -841,6 +841,22 @@ class TestEidolons:
         assert module.charge == 1  # 同一行动去重
 
 
+class TestFatalSave:
+    def test_lethal_damage_exits_rage_and_heals(self):
+        """无量忿怒下受到致命伤害：不死，退出结界并回复 50% 生命。"""
+        char = _make_mortenax()
+        char.skill_trees_raw = _trace_with_all_traces()
+        enemy = _make_enemy()
+        sim = _make_sim(char, enemy)
+        module = sim.char_modules[char.unit_id]
+        module.rage = True
+        char.current_hp = 200
+        result = module.on_incoming_damage(sim, char, 400, enemy)
+        assert result == 0.0
+        assert module.rage is False
+        assert char.current_hp == pytest.approx(10000 * 0.5)
+
+
 class TestAdditionalTraces:
     """百炼骨完整效果 / 千锻魂 / 万淬心 / E4。"""
 

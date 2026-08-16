@@ -184,6 +184,8 @@ class TribbieModule(CharacterModule):
         self.field_turns -= 1
         if self.field_turns <= 0:
             self._close_field(sim, char)
+        else:
+            self._sync_a2_hp(sim, char)
         self._sync_e4_def_ignore(sim, char)
 
     def on_skill_cast(
@@ -263,6 +265,10 @@ class TribbieModule(CharacterModule):
         log: ActionLog,
     ) -> None:
         """技能结算后：普攻相邻伤害 / 终结技全体伤害 / 队友终结技天赋追击。"""
+        if self.field_turns > 0:
+            owner = next((c for c in sim.characters if c.unit_id == self.unit_id), None)
+            if owner is not None:
+                self._sync_a2_hp(sim, owner)
         if skill.skill_type == SkillType.NORMAL:
             self._normal_adjacent(sim, char, skill, target, log)
             return
@@ -291,8 +297,12 @@ class TribbieModule(CharacterModule):
         target: EnemyState | None,
         log: ActionLog,
     ) -> None:
-        """技能（含追击链）完全结算后：结算结界附加伤害。"""
+        """技能（含追击链）完全结算后：结算附加伤害与 A2 生命上限。"""
         self._flush_added_damage(sim)
+        if self.field_turns > 0:
+            owner = next((c for c in sim.characters if c.unit_id == self.unit_id), None)
+            if owner is not None:
+                self._sync_a2_hp(sim, owner)
 
     def _flush_added_damage(self, sim: BattleSimulator) -> None:
         """结算所有待处理的结界附加伤害（取被攻击目标中生命值最高者）。"""
@@ -394,29 +404,35 @@ class TribbieModule(CharacterModule):
         self._set_vulnerability(sim, 0.0)
         self._set_vulnerability(sim, module_params(skill, 2, 0.15))
         self.field_turns = int(module_params(skill, 4, 2))
-
-        # 【长翅膀的玻璃球】：结界期间缇宝生命上限提高 = 我方全体生命上限
-        # 之和的 #1。在结界开启时计算一次（我方 HP 上限后续变化不重算，TODO）。
-        # 注意：计算时不能含 A2 buff 自身（先移除旧的再求和，避免自我叠加）。
-        char.buff_mgr.remove(A2_HP_BUFF_ID)
-        total_hp = sum(ally.final_stats().hp for ally in sim.characters)
-        if self.a2_hp_ratio > 0 and total_hp > 0:
-            char.buff_mgr.add(Buff(
-                id=A2_HP_BUFF_ID,
-                name="长翅膀的玻璃球",
-                stat="hp_flat",
-                value=total_hp * self.a2_hp_ratio,
-                duration_type=BuffDuration.PERMANENT,
-                duration_count=-1,
-                source_unit=char.unit_id,
-                stack_rule=StackRule.NO_STACK_SAME_NAME,
-            ))
+        self._sync_a2_hp(sim, char)
 
     def _close_field(self, sim: BattleSimulator, char: CharacterUnit) -> None:
         """结界解除：撤销敌方易伤贡献、移除 A2 生命上限 buff。"""
         self._set_vulnerability(sim, 0.0)
         self.field_turns = 0
         char.buff_mgr.remove(A2_HP_BUFF_ID)
+
+    def _sync_a2_hp(self, sim: BattleSimulator, owner: CharacterUnit) -> None:
+        """A2 行迹【长翅膀的玻璃球】：动态重算结界期间的生命上限。
+
+        数值 = 我方全体生命上限之和 × a2_hp_ratio。
+        每次重算先移除旧 buff，避免自我叠加。
+        """
+        if self.field_turns <= 0:
+            return
+        owner.buff_mgr.remove(A2_HP_BUFF_ID)
+        total_hp = sum(ally.final_stats().hp for ally in sim.characters)
+        if self.a2_hp_ratio > 0 and total_hp > 0:
+            owner.buff_mgr.add(Buff(
+                id=A2_HP_BUFF_ID,
+                name="长翅膀的玻璃球",
+                stat="hp_flat",
+                value=total_hp * self.a2_hp_ratio,
+                duration_type=BuffDuration.PERMANENT,
+                duration_count=-1,
+                source_unit=owner.unit_id,
+                stack_rule=StackRule.NO_STACK_SAME_NAME,
+            ))
 
     def _set_vulnerability(self, sim: BattleSimulator, rate: float) -> None:
         """设置本模块对敌方易伤的贡献（增量式 diff 应用，与其他模块共存）。"""

@@ -19,12 +19,13 @@
   上【煞火缠身】并充能 +1（嘲讽概率提高不建模）。
 - 【万淬心】：结界期间我方全体增伤；有除千冶外的虚无队友时我方终结技
   增伤，否则千冶自身额外增伤。E4 使万淬心全体增伤额外提高。
-- 致命攻击免死（解除结界并回复 #6 生命）：暂未建模。
+- 致命攻击免死：结界内受致命伤时解除结界并回复 #6 生命（已实现）。
 
 技能（nanoka ID，参数经 skill.params 读取，#N → params[N-1]）：
 - 150701 普攻「残锋，掠尽」：#1 25% 生命上限
 - 150702 战技「刃下，归葬」：#1 36% 全体、#2 4 次额外、#3 12% 每次、
-  #4 10% 生命消耗；不耗战技点；非无量忿怒或生命 ≤1 无法施放
+  #4 10% 生命消耗；不耗战技点；非无量忿怒或生命 ≤1 无法施放。
+  削韧：全体首段 10，后续 4 次弹射每次 5（用户确认）。
 - 150703 终结技「骸骨当炉，血肉即薪」：#1 20% 生命消耗开结界、#2 暴击率、
   #3 暴伤、#4 煞火缠身易伤、#5 倒计时速度 70、#6 免死回复、
   #7 煞火缠身减防、#8 持续回合 2（本体无伤害，effects 需清空）
@@ -35,9 +36,8 @@
 - 150714 强化终结技「千冶铸一，万劫烬灭」：#1 210% 生命上限全体
 
 未建模（TODO）：
-- 致命攻击免死（结界内受致命伤：解除结界、回复 50% 生命）
 - 千锻魂嘲讽概率提高、普攻/秘技的嘲讽、秘技自身减伤 90%
-- 战技额外段与强化终结技的削韧（show_stance_list 第二项语义待勘探）
+- 强化终结技的削韧数据待勘探
 """
 
 from __future__ import annotations
@@ -70,6 +70,10 @@ ELEMENT = "Fire"  # 火属性
 BLAZE_DEF_REDUCE = 0.20
 BLAZE_VULNERABILITY = 0.30
 BLAZE_TURNS = 2
+
+# 战技削韧（用户确认）：全体首段 10，后续 4 次弹射每次 5
+SKILL_TOUGHNESS_MAIN = 10.0
+SKILL_TOUGHNESS_BOUNCE = 5.0
 
 # 【百炼骨】额外能力：战斗开始/结界解除时能量不足该比例则恢复至该比例
 # （正常从行迹额外能力 param_list[0] 读取，数据缺失时使用）
@@ -325,13 +329,32 @@ class MortenaxModule(CharacterModule):
         source: Any,
         context: Any = None,
     ) -> float:
-        """千锻魂：结界持续期间，自身受到的伤害降低 50%。"""
-        if (
-            char.unit_id == self.unit_id and self.rage
-            and self.qian_enabled and amount > 0
-        ):
-            return amount * (1 - self.qian_damage_reduce)
-        return amount
+        """千锻魂减伤 + 无量忿怒致命免死。
+
+        致命免死：结界期间若本次伤害会击倒千冶，则不会死亡，
+        解除结界退出无量忿怒，并回复终结技 #6 比例的生命上限。
+        """
+        if char.unit_id != self.unit_id or amount <= 0:
+            return amount
+
+        reduced = amount
+        if self.rage and self.qian_enabled:
+            reduced = amount * (1 - self.qian_damage_reduce)
+
+        if self.rage and reduced >= char.current_hp:
+            ultra = char.skills.get(SKILL_ULTRA_OPEN)
+            heal_ratio = module_params(ultra, 6, 0.5)
+            char.current_hp = char.final_stats().hp * heal_ratio
+            self._exit_rage(sim, char)
+            if sim.logs:
+                note = f"致命免死：退出无量忿怒，回复 {heal_ratio * 100:.0f}% 生命"
+                if sim.logs[-1].notes:
+                    sim.logs[-1].notes += "；" + note
+                else:
+                    sim.logs[-1].notes = note
+            return 0.0
+
+        return reduced
 
     def on_damage_taken(
         self,
@@ -609,7 +632,7 @@ class MortenaxModule(CharacterModule):
         token = sim.frozen_action_token
         # 全体主伤害
         main_mult = module_params(skill, 1, 0.0)
-        main_toughness = self._skill_toughness(skill)
+        main_toughness = SKILL_TOUGHNESS_MAIN
         for enemy in sim.enemies:
             self._deal_hit(
                 sim, char, enemy, main_mult, main_toughness,
@@ -621,7 +644,7 @@ class MortenaxModule(CharacterModule):
             if mult <= 0:
                 continue
             self._deal_hit(
-                sim, char, sim.random_enemy(), mult, 0.0,
+                sim, char, sim.random_enemy(), mult, SKILL_TOUGHNESS_BOUNCE,
                 SkillType.SKILL, log, token,
             )
 
@@ -714,7 +737,7 @@ class MortenaxModule(CharacterModule):
     def _exit_rage(self, sim: BattleSimulator, char: CharacterUnit) -> None:
         """结界解除：退出无量忿怒、清除 buff 与倒计时记录。
 
-        触发路径：倒计时行动（on_countdown）。致命攻击免死解除结界 TODO。
+        触发路径：倒计时行动（on_countdown）或致命攻击免死。
         """
         self.rage = False
         self.countdown_unit_id = ""
@@ -756,8 +779,8 @@ class MortenaxModule(CharacterModule):
         # 本次独立行动的所有命中共享同一令牌
         token = sim.action_token
 
-        # 全体首段（#1 倍率 + 首段削韧）
-        main_toughness = self._skill_toughness(skill)
+        # 全体首段（#1 倍率 + 首段削韧 10）
+        main_toughness = SKILL_TOUGHNESS_MAIN
         for enemy in sim.enemies:
             self._follow_up_deal(
                 sim, char, enemy, module_params(skill, 1, 0.0), main_toughness, log, token,
@@ -765,7 +788,8 @@ class MortenaxModule(CharacterModule):
         # 额外 #2 次随机单体（#3 倍率；真随机固定种子）
         for _ in range(int(module_params(skill, 2, 4))):
             self._follow_up_deal(
-                sim, char, sim.random_enemy(), module_params(skill, 3, 0.0), 0, log, token,
+                sim, char, sim.random_enemy(),
+                module_params(skill, 3, 0.0), SKILL_TOUGHNESS_BOUNCE, log, token,
             )
         # E1：施放天赋的额外战技后，无量忿怒倒计时行动延后 #2
         if self.eidolon_rank >= 1 and self.countdown_unit_id:
