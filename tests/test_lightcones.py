@@ -84,6 +84,25 @@ class TestLieFinale:
         assert module.shadow_active
         assert enemy.vulnerability == pytest.approx(0.2)
 
+    def test_simulator_deal_damage_dispatches_hook(self):
+        """sim.deal_damage 必须按 LightconeModule 签名分发光锥钩子。"""
+        from src.core.damage import DamageType
+        from src.core.skill import SkillEffect
+
+        char, sim = _make_owner("23056", self.PARAMS)
+        module = sim.lightcone_modules[char.unit_id]
+        enemy = sim.enemies[0]
+        log = sim.make_follow_up_log(char, enemy, notes="回归")
+        effect = SkillEffect(
+            damage_type=DamageType.NORMAL, multiplier=1.0,
+            toughness_damage=0, element="Thunder",
+        )
+        sim.deal_damage(
+            char, enemy, effect,
+            skill_type=SkillType.FOLLOW_UP, log=log,
+        )
+        assert module.follow_up_count == 1
+
     def test_duplicate_vuln_does_not_stack(self):
         chars = []
         for uid in ("c1", "c2"):

@@ -1014,13 +1014,13 @@ class BattleSimulator:
                     self._dispatch_lightcone_hook(
                         lc_module, "on_attack_hit",
                         self, char, char, skill.skill_type,
-                        target, effect, damage, log, hit_token,
+                        target, damage, log, hit_token,
                     )
                 for relic_module in self.relic_modules.get(char.unit_id, []):
                     self._dispatch_relic_hook(
                         relic_module, "on_attack_hit",
                         self, char, char, skill.skill_type,
-                        target, effect, damage, log, hit_token,
+                        target, damage, log, hit_token,
                     )
 
         # NEXT_ATTACK 类型 buff 失效
@@ -1344,13 +1344,13 @@ class BattleSimulator:
                 self._dispatch_lightcone_hook(
                     lc_module, "on_attack_hit",
                     self, attacker, attacker, skill_type,
-                    target, effect, damage, log, token,
+                    target, damage, log, token,
                 )
             for relic_module in self.relic_modules.get(attacker.unit_id, []):
                 self._dispatch_relic_hook(
                     relic_module, "on_attack_hit",
                     self, attacker, attacker, skill_type,
-                    target, effect, damage, log, token,
+                    target, damage, log, token,
                 )
 
         return damage
