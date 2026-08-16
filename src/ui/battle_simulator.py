@@ -1795,7 +1795,7 @@ class BattleSimulatorWindow(QMainWindow):
                         continue
                     except ValueError:
                         pass
-                self.team_table.setItem(col_int, QTableWidgetItem(str(text)))
+                self.team_table.setItem(i, col_int, QTableWidgetItem(str(text)))
             # 星魂等级：优先条目级 rank 字段，其次行数据（兼容旧缓存）
             rank_value = _int(entry.get("rank"), _int(rd.rank, 0))
             self._set_rank_cell(i, rank_value)
