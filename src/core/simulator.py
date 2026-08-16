@@ -1200,9 +1200,13 @@ class BattleSimulator:
             cls = get_module_cls(char.char_id)
             if cls is None:
                 continue
-            module = cls()
-            self.char_modules[char.unit_id] = module
-            self._dispatch_hook(module, "on_battle_start", self, char)
+            self.char_modules[char.unit_id] = cls()
+        # 逆序触发进战，让后排辅助（缇宝、风堇等）的光环/buff 先挂上，
+        # 再执行前排输出角色的秘技/进战伤害。
+        for char in reversed(self.characters):
+            module = self.char_modules.get(char.unit_id)
+            if module is not None:
+                self._dispatch_hook(module, "on_battle_start", self, char)
 
     def _init_lightcone_modules(self) -> None:
         """按角色装备的光锥 ID 实例化光锥效果模块并触发战斗开始钩子。"""
