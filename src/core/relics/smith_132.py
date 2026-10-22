@@ -5,6 +5,9 @@
 - 装备者对处于防御力降低状态的敌方目标，暴击伤害提高 #1（接到 crit_dmg 字段）。
 - 装备者攻击命中减防目标后，我方全体获得【助燃】#2 回合，伤害提高 #3，无法叠加；
   每次攻击行动最多触发一次，装备者施放攻击后可再次触发。
+
+2 件套属性属**无条件面板属性**，已计入局外面板
+（`freesr.RELIC_SET_PANEL_BONUSES`），战斗内不再重复挂载；本模块只负责 4 件套。
 """
 
 from __future__ import annotations
@@ -39,21 +42,9 @@ class SmithModule(RelicSetModule):
     _assist_tokens: set[int] = set()
 
     def on_battle_start(self, sim: BattleSimulator, owner: CharacterUnit) -> None:
+        """重置 4 件套状态（2 件套生命上限已在局外面板）。"""
         self.crit_contrib = {}
         self._assist_tokens = set()
-        if owner.relic_set_counts.get(SET_ID, 0) < 2:
-            return
-        owner.buff_mgr.add(Buff(
-            id="relic132_hp",
-            name="名冶·生命",
-            stat="hp_pct",
-            value=_param(owner, 2, 1, 0.12),
-            duration_type=BuffDuration.PERMANENT,
-            duration_count=-1,
-            source_unit=owner.unit_id,
-            stack_rule=StackRule.NO_STACK_SAME_NAME,
-        ))
-        owner.current_hp = owner.final_stats().hp
 
     def on_attack_hit(
         self,

@@ -202,8 +202,8 @@ class TestBattleStartAV:
         """风堇第一动行动值应按进战最终速度计算（10000/260≈38.46）。"""
         char = _make_hyacine()
         char.base_stats.spd_base = 110
-        # 光锥第一句速度 18% 已计入面板；遗器 125/320 各 +6% 由套装模块在进战挂载
-        char.bonus_stats = StatBonus(spd_pct=0.18, spd_flat=117.0)
+        # 光锥第一句速度 18% 与遗器 125/320 各 +6% 都已计入局外面板绿字
+        char.bonus_stats = StatBonus(spd_pct=0.30, spd_flat=117.0)
         char.lightcone_id = "23042"
         char.lightcone_rank = 1
         char.lightcone_params = [0.18, 0.01, 0, 0.18, 2, 2.5]

@@ -3,6 +3,9 @@
 2件：追加攻击伤害提高 #1。
 4件：追加攻击的每段命中使装备者攻击力提高 #1，最多 #2 层，持续 #3 回合；
 下一次追加攻击行动开始时移除旧层数，同一行动多段命中不重复清空。
+
+2 件套属性属**无条件面板属性**，已计入局外面板
+（`freesr.RELIC_SET_PANEL_BONUSES`），战斗内不再重复挂载；本模块只负责 4 件套。
 """
 
 from __future__ import annotations
@@ -37,20 +40,9 @@ class DukeModule(RelicSetModule):
     stacks: int = 0
 
     def on_battle_start(self, sim: BattleSimulator, owner: CharacterUnit) -> None:
+        """重置追加攻击层数状态（2 件套增伤已在局外面板）。"""
         self.current_follow_up_token = None
         self.stacks = 0
-        if owner.relic_set_counts.get(SET_ID, 0) < 2:
-            return
-        owner.buff_mgr.add(Buff(
-            id="relic115_follow_up_dmg",
-            name="大公·追加攻击",
-            stat="follow_up_dmg_bonus",
-            value=_param(owner, 2, 1, 0.20),
-            duration_type=BuffDuration.PERMANENT,
-            duration_count=-1,
-            source_unit=owner.unit_id,
-            stack_rule=StackRule.NO_STACK_SAME_NAME,
-        ))
 
     def on_attack_hit(
         self,

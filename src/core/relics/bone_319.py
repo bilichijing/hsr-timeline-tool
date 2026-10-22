@@ -2,6 +2,10 @@
 
 2件：生命上限提高 #1；生命上限 ≥ #2 时，装备者暴击伤害提高 #3。
 忆灵部分暂未建模（TODO）。
+
+“生命上限提高”属无条件面板属性，已计入局外面板
+（`freesr.RELIC_SET_PANEL_BONUSES`）；本模块只负责“生命上限达标 → 暴击伤害提高”
+这一条件效果（阈值判定用含面板加成的最终生命上限）。
 """
 
 from __future__ import annotations
@@ -33,17 +37,6 @@ class BoneModule(RelicSetModule):
     def on_battle_start(self, sim: BattleSimulator, owner: CharacterUnit) -> None:
         if owner.relic_set_counts.get(SET_ID, 0) < 2:
             return
-        owner.buff_mgr.add(Buff(
-            id="relic319_hp",
-            name="拾骨地·生命",
-            stat="hp_pct",
-            value=_param(owner, 1, 0.12),
-            duration_type=BuffDuration.PERMANENT,
-            duration_count=-1,
-            source_unit=owner.unit_id,
-            stack_rule=StackRule.NO_STACK_SAME_NAME,
-        ))
-        owner.current_hp = owner.final_stats().hp
         if owner.final_stats().hp >= _param(owner, 2, 5000):
             owner.buff_mgr.add(Buff(
                 id="relic319_crit_dmg",

@@ -17,8 +17,9 @@ from __future__ import annotations
 from typing import Any
 
 from .eidolon import rank_skill_level_bonuses
+from .damage import DamageType
 from .simulator import CharacterUnit
-from .skill import SkillType, parse_all_skills
+from .skill import Skill, SkillEffect, SkillType, parse_all_skills
 from .stats import BaseStats, StatBonus
 
 MAX_LEVEL = 80  # 满级等级
@@ -192,4 +193,102 @@ def build_character_unit(
         relic_set_effects={k: dict(v) for k, v in (relic_set_effects or {}).items()},
         memosprite_raw=memosprite_raw or {},
         memo_skill_level=max(1, min(10, int(memo_skill_level))),
+    )
+
+
+# ── 预设角色（无 nanoka 数据时的回退构造）──────────────────
+
+
+def make_preset_character(
+    unit_id: str,
+    name: str,
+    path: str,
+    element: str,
+    hp: float = 10000,
+    atk: float = 1000,
+    def_: float = 500,
+    spd: float = 100,
+    crit_rate: float = 0.05,
+    crit_dmg: float = 0.5,
+    break_effect: float = 0.0,
+    effect_hit: float = 0.0,
+    effect_res: float = 0.0,
+    energy_regen: float = 0.0,
+    outgoing_heal: float = 0.0,
+    dmg_bonus: float = 0.0,
+) -> CharacterUnit:
+    """构造预设角色（带普攻/战技/终结技，幂等倍率）。
+
+    真实角色数据未就绪（或纯手工配队）时作为回退：技能倍率固定
+    1.0 / 2.0 / 4.0，削韧 10 / 20 / 30，能量上限与终结技耗能对齐（120）。
+    """
+    base = BaseStats(
+        hp_base=hp,
+        atk_base=atk,
+        def_base=def_,
+        spd_base=spd,
+        crit_rate=crit_rate,
+        crit_dmg=crit_dmg,
+        break_effect=break_effect,
+        effect_hit=effect_hit,
+        effect_res=effect_res,
+        energy_regen=energy_regen,
+        outgoing_heal=outgoing_heal,
+    )
+    bonus = StatBonus(dmg_bonus=dmg_bonus)
+
+    normal = Skill(
+        id=f"{unit_id}_normal",
+        name="普攻",
+        skill_type=SkillType.NORMAL,
+        sp_cost=-1,
+        energy_recover=20,
+        effects=[SkillEffect(
+            damage_type=DamageType.NORMAL,
+            multiplier=1.0,
+            toughness_damage=10,
+            element=element,
+        )],
+    )
+    skill = Skill(
+        id=f"{unit_id}_skill",
+        name="战技",
+        skill_type=SkillType.SKILL,
+        sp_cost=1,
+        energy_recover=30,
+        effects=[SkillEffect(
+            damage_type=DamageType.NORMAL,
+            multiplier=2.0,
+            toughness_damage=20,
+            element=element,
+        )],
+    )
+    ultra = Skill(
+        id=f"{unit_id}_ultra",
+        name="终结技",
+        skill_type=SkillType.ULTRA,
+        energy_cost=120,
+        effects=[SkillEffect(
+            damage_type=DamageType.NORMAL,
+            multiplier=4.0,
+            toughness_damage=30,
+            element=element,
+        )],
+    )
+
+    # 能量上限与终结技耗能对齐（否则能量永远无法达到耗能要求，放不出终结技）
+    base.energy_max = 120
+
+    return CharacterUnit(
+        unit_id=unit_id,
+        name=name,
+        path=path,
+        element=element,
+        base_stats=base,
+        bonus_stats=bonus,
+        skills={
+            normal.id: normal,
+            skill.id: skill,
+            ultra.id: ultra,
+        },
     )

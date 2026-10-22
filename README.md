@@ -29,6 +29,7 @@
 ## 功能特性
 
 - **真实数据角色配置**：从 nanoka 拉取角色列表（中文名 / 命途 / 属性 / 稀有度 / 头像），双击名称列即可用选择器（关键词搜索 + 命途 / 属性筛选）替换队伍成员。
+- **光锥与遗器选择器**：双击光锥列打开光锥选择器（命途 / 稀有度筛选 + **叠影 1~5**）；双击遗器列打开遗器配置（6 部位：套装选择器 + 主词条 + 最多 4 条副词条），确认后自动回填面板。
 - **freesr-data.json 一键导入**：解析 `avatars` / `relics` / `lightcones`，自动计算最终面板（角色基础 + 光锥基础 + 遗器主副词条 + 行迹加成 + 光锥第一句常驻加成），并接入星魂、光锥叠影与遗器套装效果。
 - **交互式排轴**：手动推进 AV、角色回合选择普攻 / 战技 / 终结技、终结技随时插队、任意一步**快照回溯**（撤销到历史行动）。
 - **完整伤害体系**：常规、击破、超击破、持续、欢愉、真实伤害共 6 类，各自独立的乘区（增伤 / 易伤 / 虚弱 / 减伤 / 抗性穿透 / 防御 / 暴击 / 击破特攻 / 欢愉度 / 增笑 / 笑点区…）。
@@ -42,7 +43,7 @@
 
 | # | Tab | 内容 |
 |---|---|---|
-| 0 | ⚙ 配置 | 队伍表格（15 列）、光锥 / 星魂、全局技能等级、敌方木桩、战斗参数、敌方攻击调度、freesr 导入 |
+| 0 | ⚙ 配置 | 队伍表格（16 列：名称 / 光锥 / 遗器 / 星魂 + 12 项属性；双击前三列分别选择角色、光锥、遗器）、全局技能等级、敌方木桩、战斗参数、敌方攻击调度、freesr 导入 |
 | 1 | ▶ 交互模拟 | 能量球、SP 指示器、敌人卡片、推进 / 普攻 / 战技 / 终结技按钮、快照回溯 |
 | 2 | ☰ 行动日志 | 回合 / AV / 总行动值 / 行动者 / 操作 / 伤害明细 / 总伤害 / 备注 |
 | 3 | ◔ AV 时间轴 | 各单位行动点甘特图（滚轮缩放、拖动平移、悬停详情） |
@@ -97,7 +98,7 @@ python ui_main.py
 
 ## 使用流程
 
-1. **配置队伍**：在"⚙ 配置"页双击名称列选择角色；也可点"导入 freesr-data.json"一次性导入角色面板、遗器与光锥。
+1. **配置队伍**：在"⚙ 配置"页**双击名称列**选择角色、**双击光锥列**选择光锥与叠影等级、**双击遗器列**配置 6 个部位（套装 / 主词条 / 副词条）。也可以点"导入 freesr-data.json"一次性导入角色面板、遗器与光锥。
 2. **设置敌方与战斗参数**：敌方数量（1~5）、韧性、生命、弱点属性、等级、非弱点抗性；初始 SP、战斗总行动值上限、默认行动策略。
 3. **（可选）配置敌方攻击**：在敌方攻击表中按总行动值安排攻击来源、攻击力、目标角色与回能。
 4. **进入"▶ 交互模拟"**：按空格 / 回车推进时间；轮到角色时用普攻 / 战技，或用数字键 1~4 随时插入终结技。
@@ -120,7 +121,7 @@ python ui_main.py
 
 ```
 hsr-timeline-tool/
-├── ui_main.py                       # 入口：调用 src/ui/battle_simulator.py 的 main()
+├── ui_main.py                       # 启动入口：调用 src/ui/battle_simulator.py 的 main()
 ├── verify_api.py                    # 手动验证脚本：实测 nanoka 数据通路与图标 URL
 ├── freesr-data.json                 # 示例 freesr 配置（也是 tests/test_freesr.py 的输入）
 ├── pyproject.toml                   # 依赖、pytest、ruff 配置
@@ -142,15 +143,16 @@ hsr-timeline-tool/
 │   │   ├── buff.py                  # Buff 系统（时效类型、叠加规则）
 │   │   ├── sp.py                    # 战技点
 │   │   ├── eidolon.py               # 星魂效果参数读取
-│   │   ├── character_factory.py     # nanoka 详情 + freesr 数据 → CharacterUnit
-│   │   ├── freesr.py                # freesr-data.json 解析与面板计算
+│   │   ├── character_factory.py     # nanoka 详情 + freesr → CharacterUnit；预设角色
+│   │   ├── freesr.py                # freesr 解析、面板计算、光锥/遗器 2 件套面板加成
 │   │   ├── characters/              # 角色技能模块（不死途 / 缇宝 / 千冶•刃 / 风堇）
 │   │   ├── lightcones/              # 光锥叠影模块（23056 / 23059 / 23038 / 23042）
-│   │   └── relics/                  # 遗器套装模块（110 / 115 / 125 / 132 / 308 / 319 / 320 / 326）
+│   │   └── relics/                  # 遗器套装模块 + labels.py（部位/词条中文文案）
 │   └── ui/                          # PySide6 界面
 │       ├── battle_simulator.py      # 主窗口 BattleSimulatorWindow + main()
 │       ├── theme.py                 # 深色 QSS（DARK_STYLE）与颜色 / 命途 / 属性常量
-│       └── widgets/                 # character_picker / timeline_gantt / damage_pie
+│       └── widgets/                 # character_picker / lightcone_picker / relic_picker
+│                                    # relic_config / timeline_gantt / damage_pie
 │                                    # sp_indicator / energy_orb / enemy_target
 ├── tests/                           # pytest（fixtures/ 为 nanoka 原始 JSON 样本）
 └── cache/                           # diskcache、图标、队伍配置（运行时生成，已 gitignore）
@@ -161,7 +163,7 @@ hsr-timeline-tool/
 - **基址**：`https://static.nanoka.cc`；星铁数据根 `https://static.nanoka.cc/hsr`；资源根 `https://static.nanoka.cc/assets/hsr`。
 - **版本**：由 `manifest.json` 的 `hsr.latest` 决定列表 / 详情路径。
 - **路径**：列表 `hsr/{version}/{entity}.json`（`character` / `lightcone` / `relicset` / `monster`）；详情 `hsr/{version}/zh/{entity}/{id}.json`。
-- **缓存**：`diskcache` 位于 `./cache`，TTL 为 manifest 1 小时 / 列表 10 分钟 / 详情 1 小时；请求失败时回退过期缓存。角色头像缓存在 `./cache/icons`。
+- **缓存**：`diskcache` 位于 `./cache`，TTL 为 manifest 1 小时 / 列表 10 分钟 / 详情 1 小时；请求失败时回退过期缓存。角色 / 光锥 / 遗器套装的图标缓存在 `./cache/icons`。
 - 所有网络请求都经过 [`src/api/client.py`](src/api/client.py)，UI 线程通过 `run_in_loop()` 提交到共享 asyncio 事件循环。
 
 可用 `python verify_api.py` 手动实测整条数据通路（manifest → 列表 → 详情 → 提纯 → 图标 URL 可访问性 → 缓存命中）。
@@ -193,13 +195,16 @@ python -m pytest tests/test_av_system.py                # 单个文件
 python -m pytest tests/test_av_system.py -k next_actor  # 单个用例
 ```
 
-- 当前共 **407 个用例**（21 个测试文件），覆盖 AV 系统、属性、Buff、技能解析、伤害、模拟器、星魂、freesr、角色 / 光锥 / 遗器模块与多敌人场景。
+- 当前共 **410 个用例**（21 个测试文件），覆盖 AV 系统、属性、Buff、技能解析、伤害、模拟器、星魂、freesr、角色 / 光锥 / 遗器模块与多敌人场景。
 - 测试使用 [`tests/fixtures/`](tests/fixtures/) 中的 nanoka 原始 JSON 样本，**不打真实网络**。
 - ⚠️ [`tests/test_freesr.py`](tests/test_freesr.py) 直接读取仓库根目录的 `freesr-data.json`，并断言其中不死途（1504）的星魂 / 能量 / 遗器数值。若替换了该文件（换了角色或配装），其中 4 个用例会因数据不匹配而失败，需要同步更新期望值。
 
 ## 已知限制与 TODO
 
-- 目前**仅 4 位角色、4 把光锥、8 套遗器**实现了专属机制，其余角色只按通用技能数据计算。
+- 目前**仅 4 位角色、4 把光锥、8 套遗器**实现了专属机制，其余角色只按通用技能数据计算（光锥 / 遗器选择器本身支持全部条目）。
+- 遗器按 6 部位配置且支持副词条，但等级固定 15 级、主词条数值取自固定表；位面球主词条（id4~10）暂时统一计入通用增伤。
+- **遗器 2 件套的无条件属性**（生命上限 / 速度 / 能量恢复效率 / 风伤 / 追击增伤）已计入面板；**阈值与触发类效果**（如「速度 ≥135/180 时治疗量提高」「生命上限 ≥5000 时暴击伤害提高」）只在战斗内生效，面板不显示。
+- 少数光锥图标在 nanoka 资源站缺失（如 23056、23059 的 `itemfigures` 返回 404），选择器里显示灰色占位图，不影响选择与计算。
 - 敌方单位只有"木桩"（速度 0，不进入行动队列），敌方行为靠"敌方攻击调度"配置模拟。
 - 没有结果导出功能（不能导出 CSV / JSON / 图片）；快照回溯只有撤销，没有重做。
 - 欢愉技倍率字段尚未勘探（`elation_skill_level` 目前只存储不生效）；忆灵只实现了风堇的轻量模型，遗器 319 的忆灵部分未建模。

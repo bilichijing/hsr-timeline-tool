@@ -9,10 +9,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 常用命令
 
 ```bash
-# 运行 GUI（入口，10 行，实际逻辑在 src/ui/battle_simulator.py 的 main()）
+# 运行 GUI 桌面端（入口，10 行，实际逻辑在 src/ui/battle_simulator.py 的 main()）
 python ui_main.py
 
-# 运行测试（当前 407 个用例：403 通过 + test_freesr.py 中 4 个受数据文件影响）
+# 运行测试（当前 410 个用例：406 通过 + test_freesr.py 中 4 个受数据文件影响）
 python -m pytest                                         # 全部
 python -m pytest tests/test_av_system.py                 # 单个文件
 python -m pytest tests/test_av_system.py -k "next_actor" # 单测
@@ -49,14 +49,15 @@ python verify_api.py
   - `skill.py` — `SkillType` 八种（`NORMAL`/`SKILL`/`ULTRA`/`TALENT`/`TECHNIQUE`/`MEMO_DNSKILL`/`FOLLOW_UP`/`ADDED`）、`parse_all_skills()`、`get_skill_by_type()`；`bp_need=-1` 语义见下文。
   - `sp.py` — 战技点（`MAX=5`、`INITIAL=3`、`consume`/`recover`/`can_consume`）。
   - `eidolon.py` — 星魂参数读取（`parse_eidolons`/`get_rank_param`/`has_rank`/`rank_skill_level_bonuses`）。
-  - `character_factory.py` — `build_character_unit(...)` 把 nanoka 详情 + freesr 数据装配成 `CharacterUnit`；`convert_stats80()`、`extract_trace_bonuses()`。
-  - `freesr.py` — `parse_freesr()`、`parse_relic()`、`calc_sub_affix()`、`calc_relic_bonus()`、`compute_panel()` / `compute_panel_breakdown()`、`apply_lightcone_panel_bonus()`（光锥第一句常驻面板加成）。
+  - `character_factory.py` — `build_character_unit(...)` 把 nanoka 详情 + freesr 数据装配成 `CharacterUnit`；`convert_stats80()`、`extract_trace_bonuses()`；`make_preset_character()`（真实数据未就绪时的回退，桌面端预设角色用）。
+  - `freesr.py` — `parse_freesr()`、`parse_relic()`、`calc_sub_affix()`、`calc_relic_bonus()`、`compute_panel()` / `compute_panel_breakdown()`、`apply_lightcone_panel_bonus()`（光锥第一句常驻加成）、`apply_relic_set_panel_bonus()`（遗器 2 件套无条件属性）。
   - `characters/`、`lightcones/`、`relics/` — 三类**效果模块**（见下节）。
 
 - **`src/ui/`** — PySide6 界面：
-  - `battle_simulator.py` — 约 3498 行的主窗口（`BattleSimulatorWindow(QMainWindow)`），侧栏 + **7 个 Tab**（配置 / 交互模拟 / 行动日志 / AV 时间轴 / 伤害占比 / 伤害明细 / 汇总）。已接入 nanoka 真实角色列表（`CharacterPickerDialog`）；`make_preset_character()`（模块级函数）是真实数据未就绪时的回退路径。队伍配置存 `./cache/team_config.json`（version 4）。
+  - `battle_simulator.py` — 约 3876 行的主窗口（`BattleSimulatorWindow(QMainWindow)`），侧栏 + **7 个 Tab**（配置 / 交互模拟 / 行动日志 / AV 时间轴 / 伤害占比 / 伤害明细 / 汇总）。队伍表 **16 列**（名称 / 光锥 / 遗器 / 星魂 + 12 项属性），双击前三列分别触发三种选择器：名称 → `CharacterPickerDialog`、光锥 → `LightconePickerDialog`、遗器 → `RelicConfigDialog`。真实数据未就绪时回退到 `core.character_factory.make_preset_character()`。队伍配置存 `./cache/team_config.json`（**version 6**，v2~v5 会自动迁移列号）。
   - `theme.py` — 深色 QSS（`DARK_STYLE`）与颜色常量（`Colors`、`ELEMENT_COLORS`、`PATH_COLORS`），样式集中于此，不在控件里硬编码。
-  - `widgets/` — 复用控件：`character_picker`（真实角色选择器，含图标下载）、`timeline_gantt`（甘特图）、`damage_pie`、`sp_indicator`、`energy_orb`、`enemy_target`。
+  - `widgets/` — 复用控件：`character_picker`（真实角色选择器，含图标下载）、`lightcone_picker`（光锥选择器 + 叠影 1~5）、`relic_picker`（遗器套装选择器）、`relic_config`（6 部位遗器配置：套装 / 主词条 / 副词条）、`timeline_gantt`（甘特图）、`damage_pie`、`sp_indicator`、`energy_orb`、`enemy_target`。
+  - **面板计算只有一个入口** `BattleSimulatorWindow._apply_row_panel(row)`：角色详情加载完成、选光锥、配遗器、freesr 导入都调它（内部 `compute_panel_breakdown()` → `apply_lightcone_panel_bonus()` → `apply_relic_set_panel_bonus()`），改动面板逻辑不要另写分支。
 
 - **`tests/`** — pytest（扁平结构 `tests/test_*.py`）；`conftest.py` 提供 `tests/fixtures/*.json`（角色 / 光锥 / 遗器列表与详情、怪物列表）作为 fixtures。
 
@@ -68,7 +69,7 @@ python verify_api.py
 
 - `src/core/characters/` — `CharacterModule`（`CHAR_ID` = nanoka 角色 ID）。已实现：不死途 1504（巡猎/雷）、缇宝 1403（同谐/量子）、千冶•刃 1507（虚无/火）、风堇 1409（记忆/风）。
 - `src/core/lightcones/` — `LightconeModule`。已实现 23056 / 23059 / 23038 / 23042；**第一句常驻加成不在模块里**（走 `freesr.apply_lightcone_panel_bonus` 计入面板绿字，战斗内不重复挂载）。
-- `src/core/relics/` — `RelicSetModule`（`CHAR_ID` = SET_ID）。已实现 110 / 115 / 125 / 132 / 308 / 319 / 320 / 326；实例化时件数 `< 2` 的套装跳过，2 件 / 4 件由模块内部自判。
+- `src/core/relics/` — `RelicSetModule`（`CHAR_ID` = SET_ID）。已实现 110 / 115 / 125 / 132 / 308 / 319 / 320 / 326；实例化时件数 `< 2` 的套装跳过，2 件 / 4 件由模块内部自判。**2 件套的无条件属性（生命上限 / 速度 / 回能 / 风伤 / 追击增伤）计入局外面板**（`freesr.RELIC_SET_PANEL_BONUSES` + `apply_relic_set_panel_bonus`），模块只实现条件 / 阈值效果与 4 件套——**两处不得重复挂载**。
 
 **约定**：模块状态字段必须是纯数据（str/int/float/list），不持有 sim/char 引用（`snapshot()` 用 deepcopy）；技能参数用 `module_params(skill, N, default)` 读取（`#N → params[N-1]`），数据缺失时 no-op 并在 `log.notes` 标注。
 

@@ -4,6 +4,9 @@
 4件：装备者及其忆灵为装备者/忆灵以外的我方目标治疗后，装备者获得【甘霖】，
 每回合最多触发 1 次，持续 #3 回合；【甘霖】期间速度提高 #1，我方全体
 暴击伤害提高 #2，同类效果无法叠加。
+
+2 件套属性属**无条件面板属性**，已计入局外面板
+（`freesr.RELIC_SET_PANEL_BONUSES`），战斗内不再重复挂载；本模块只负责 4 件套【甘霖】。
 """
 
 from __future__ import annotations
@@ -18,7 +21,6 @@ if TYPE_CHECKING:
     from ..simulator import BattleSimulator, CharacterUnit
 
 SET_ID = "125"
-SPEED_BUFF_ID = "relic125_speed"
 GANLIN_SPEED_ID = "relic125_ganlin_speed"
 GANLIN_CRIT_ID = "relic125_ganlin_crit"
 
@@ -36,15 +38,8 @@ class ValkyrieModule(RelicSetModule):
     can_grant: bool = False
 
     def on_battle_start(self, sim: BattleSimulator, owner: CharacterUnit) -> None:
+        """2 件套（速度提高）已在局外面板，此处只重置【甘霖】触发状态。"""
         self.can_grant = True
-        if owner.relic_set_counts.get(SET_ID, 0) < 2:
-            return
-        owner.buff_mgr.add(Buff(
-            id=SPEED_BUFF_ID, name="女武神·速度", stat="spd_pct",
-            value=_param(owner, 2, 1, 0.06),
-            duration_type=BuffDuration.PERMANENT, duration_count=-1,
-            source_unit=owner.unit_id, stack_rule=StackRule.NO_STACK_SAME_NAME,
-        ))
 
     def on_turn_start(self, sim: BattleSimulator, owner: CharacterUnit) -> None:
         self.can_grant = True

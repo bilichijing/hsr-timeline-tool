@@ -2,6 +2,10 @@
 
 2件：速度提高 #1；速度 ≥ #2 / #3 时，装备者及其忆灵的治疗量提高
 #4 / #5。
+
+“速度提高”属无条件面板属性，已计入局外面板
+（`freesr.RELIC_SET_PANEL_BONUSES`）；本模块只负责速度阈值的治疗量提高
+（阈值判定用含面板加成的最终速度）。
 """
 
 from __future__ import annotations
@@ -16,7 +20,6 @@ if TYPE_CHECKING:
     from ..simulator import BattleSimulator, CharacterUnit
 
 SET_ID = "320"
-SPEED_BUFF_ID = "relic320_speed"
 HEAL_BUFF_ID = "relic320_heal"
 
 
@@ -31,14 +34,9 @@ class TreeModule(RelicSetModule):
     CHAR_ID = SET_ID
 
     def on_battle_start(self, sim: BattleSimulator, owner: CharacterUnit) -> None:
+        """2 件套速度已在局外面板，此处只按速度阈值同步治疗量。"""
         if owner.relic_set_counts.get(SET_ID, 0) < 2:
             return
-        owner.buff_mgr.add(Buff(
-            id=SPEED_BUFF_ID, name="巨树·速度", stat="spd_pct",
-            value=_param(owner, 1, 0.06),
-            duration_type=BuffDuration.PERMANENT, duration_count=-1,
-            source_unit=owner.unit_id, stack_rule=StackRule.NO_STACK_SAME_NAME,
-        ))
         self._sync_heal_bonus(owner)
 
     def on_turn_start(self, sim: BattleSimulator, owner: CharacterUnit) -> None:

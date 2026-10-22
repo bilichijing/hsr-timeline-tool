@@ -1,9 +1,16 @@
-"""遗器套装效果测试（freesr 中已出现的六套）。"""
+"""遗器套装效果测试。
+
+覆盖两部分：
+- 各套装模块在**战斗内**挂载的条件效果（4 件套等）；
+- 2 件套里**无条件**的面板属性（`freesr.apply_relic_set_panel_bonus`，
+  见 TestPanelBonus）——这些属性不再由模块在战斗中重复挂载。
+"""
 
 from __future__ import annotations
 
 import pytest
 
+from src.core.freesr import apply_relic_set_panel_bonus
 from src.core.relics import get_module_cls
 from src.core.simulator import BattleSimulator, CharacterUnit, EnemyState
 from src.core.skill import Skill, SkillType
@@ -57,10 +64,6 @@ class TestRegistry:
 
 
 class TestEagle:
-    def test_wind_damage_bonus(self):
-        char, sim = _make_owner("110", {"2": [0.1], "4": [0.25]}, count=4)
-        assert char.final_stats().elemental_dmg_bonus["Wind"] == pytest.approx(0.1)
-
     def test_ultra_action_advance(self):
         char, sim = _make_owner("110", {"2": [0.1], "4": [0.25]}, count=4)
         before = sim.action_queue.get(char.unit_id).current_av
@@ -71,11 +74,10 @@ class TestEagle:
 
 
 class TestDuke:
-    def test_follow_up_damage_and_stacks(self):
+    def test_follow_up_stacks(self):
         char, sim = _make_owner("115", {"2": [0.2], "4": [0.06, 8, 3]}, count=4)
         module = _relic_module(sim)
         enemy = sim.enemies[0]
-        assert char.final_stats().follow_up_dmg_bonus == pytest.approx(0.2)
         # 同一行动 8 段 → 8 层
         for token in range(8):
             module.on_attack_hit(sim, char, char, SkillType.FOLLOW_UP, enemy, 10, None, 1)
@@ -92,7 +94,6 @@ class TestSmith:
         char, sim = _make_owner("132", {"2": [0.12], "4": [0.28, 2, 0.15]}, count=4)
         module = _relic_module(sim)
         enemy = sim.enemies[0]
-        assert char.final_stats().hp == pytest.approx(5000 * 1.12)
         enemy.def_reduce = 0.2
         module.on_attack_hit(sim, char, char, SkillType.NORMAL, enemy, 10, None, 1)
         assert enemy.crit_dmg_taken_by_unit["c1"] == pytest.approx(0.28)
@@ -107,18 +108,17 @@ class TestSmith:
 
 
 class TestVonwacq:
-    def test_energy_regen_and_pull(self):
+    def test_high_speed_pull(self):
         char, sim = _make_owner("308", {"2": [0.05, 120, 0.4]}, count=2, spd=130)
-        assert char.final_stats().energy_regen == pytest.approx(0.05)
         assert sim.action_queue.get(char.unit_id).current_av == pytest.approx(
             10000 / 130 * 0.6
         )
 
 
 class TestBone:
-    def test_hp_and_crit(self):
+    def test_hp_threshold_crit(self):
         char, sim = _make_owner("319", {"2": [0.12, 5000, 0.28]}, count=2, hp=6000)
-        assert char.final_stats().hp == pytest.approx(6000 * 1.12)
+        # 生命上限达标（阈值判定用含面板加成的最终生命上限）
         assert char.final_stats().crit_dmg == pytest.approx(0.5 + 0.28)
 
 
@@ -144,8 +144,8 @@ class TestValkyrie:
         ally.base_stats = BaseStats(hp_base=5000, spd_base=100)
         module.on_heal(sim, char, char, ally, 100, 100, 100, "memosprite")
         assert module.can_grant is False
-        # 基础 2 件速度 6% + 甘霖速度 6%，最终 +12%
-        assert char.final_stats().spd == pytest.approx(100 * 1.12)
+        # 甘霖期间速度提高 6%（2 件套的 6% 已计入局外面板，不在此处）
+        assert char.final_stats().spd == pytest.approx(100 * 1.06)
         assert char.final_stats().crit_dmg == pytest.approx(0.5 + 0.15)
         # 风堇回合开始后可再次触发
         module.on_turn_start(sim, char)
@@ -160,3 +160,53 @@ class TestTree:
         char.base_stats.spd_base = 200
         _relic_module(sim).on_turn_start(sim, char)
         assert char.final_stats().outgoing_heal == pytest.approx(0.20)
+
+
+# ── 2 件套无条件属性 → 局外面板 ───────────────────────────
+
+
+def _panel(
+    set_id: str,
+    effects: dict,
+    *,
+    count: int = 2,
+    hp: float = 1000.0,
+    spd: float = 100.0,
+):
+    """在空白面板上叠加某套装的 2 件套面板加成，返回 (绿字, 最终面板)。"""
+    base = BaseStats(hp_base=hp, atk_base=1000, spd_base=spd)
+    bonus = StatBonus()
+    final = apply_relic_set_panel_bonus(base, bonus, {set_id: count}, {set_id: effects})
+    return bonus, final
+
+
+class TestPanelBonus:
+    """2 件套的**无条件**属性计入局外面板；条件 / 阈值效果不计入。"""
+
+    def test_unconditional_stats_added_to_panel(self):
+        assert _panel("132", {"2": [0.12]})[1].hp == pytest.approx(1000 * 1.12)
+        assert _panel("319", {"2": [0.12, 5000, 0.28]}, hp=8000)[1].hp == pytest.approx(
+            8000 * 1.12
+        )
+        assert _panel("320", {"2": [0.06, 135, 180, 0.12, 0.2]})[1].spd == pytest.approx(106)
+        assert _panel("125", {"2": [0.06]})[1].spd == pytest.approx(106)
+        assert _panel("308", {"2": [0.05, 120, 0.4]})[1].energy_regen == pytest.approx(0.05)
+        bonus, _ = _panel("110", {"2": [0.1]})
+        assert bonus.elemental_dmg_bonus["Wind"] == pytest.approx(0.1)
+        assert _panel("115", {"2": [0.2]})[1].follow_up_dmg_bonus == pytest.approx(0.2)
+
+    def test_conditional_effects_not_in_panel(self):
+        # 320 治疗量按速度阈值触发 → 不进面板
+        fast = _panel("320", {"2": [0.06, 135, 180, 0.12, 0.2]}, spd=200)[1]
+        assert fast.outgoing_heal == pytest.approx(0.0)
+        # 319 暴击伤害按生命上限阈值触发 → 不进面板（只有生命上限进）
+        assert _panel("319", {"2": [0.12, 5000, 0.28]}, hp=8000)[1].crit_dmg == pytest.approx(0.5)
+        # 326 只有触发式效果 → 面板不变
+        assert _panel("326", {"2": [0.24, 2, 0.12]})[1].atk == pytest.approx(1000)
+
+    def test_single_piece_not_applied(self):
+        assert _panel("132", {"2": [0.12]}, count=1)[1].hp == pytest.approx(1000)
+
+    def test_missing_params_fall_back_to_defaults(self):
+        assert _panel("132", {})[1].hp == pytest.approx(1000 * 1.12)
+        assert _panel("320", {})[1].spd == pytest.approx(106)

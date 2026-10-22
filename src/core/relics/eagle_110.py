@@ -2,13 +2,15 @@
 
 2件：风属性伤害提高 #1。
 4件：装备者施放终结技后，自身行动提前 #1。
+
+2 件套属性属**无条件面板属性**，已计入局外面板
+（`freesr.RELIC_SET_PANEL_BONUSES`），战斗内不再重复挂载；本模块只负责 4 件套。
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ..buff import Buff, BuffDuration, StackRule
 from ..skill import SkillType
 from . import register
 from .base import RelicSetModule
@@ -33,19 +35,7 @@ class EagleModule(RelicSetModule):
     CHAR_ID = SET_ID
 
     def on_battle_start(self, sim: BattleSimulator, owner: CharacterUnit) -> None:
-        if owner.relic_set_counts.get(SET_ID, 0) < 2:
-            return
-        owner.buff_mgr.add(Buff(
-            id="relic110_wind_dmg",
-            name="翔鹰·风伤",
-            stat="elemental_dmg_bonus",
-            element="Wind",
-            value=_param(owner, 2, 1, 0.10),
-            duration_type=BuffDuration.PERMANENT,
-            duration_count=-1,
-            source_unit=owner.unit_id,
-            stack_rule=StackRule.NO_STACK_SAME_NAME,
-        ))
+        """2 件套（风属性伤害提高）已在局外面板，战斗内无需挂载。"""
 
     def on_skill_end(
         self,

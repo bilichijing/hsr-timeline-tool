@@ -347,6 +347,61 @@ def apply_lightcone_panel_bonus(
     return StatCalculator(base=base, bonus=bonus).final()
 
 
+# 遗器套装“2 件套无条件属性”的局外面板加成：
+# {套装ID: [(StatBonus 字段, 元素(仅 elemental_dmg_bonus 用), 件数, 参数序号, 缺省值)]}
+# 只登记**无条件**属性（如“生命上限提高12%”“速度提高6%”）；
+# 带阈值 / 触发条件的部分（如“速度≥135/180 时治疗量提高”“施放终结技后行动提前”）
+# 由对应套装模块在战斗内挂载，不进面板。
+RELIC_SET_PANEL_BONUSES: dict[str, list[tuple[str, str | None, int, int, float]]] = {
+    "110": [("elemental_dmg_bonus", "Wind", 2, 1, 0.10)],  # 晨昏交界的翔鹰：风属性伤害提高
+    "115": [("follow_up_dmg_bonus", None, 2, 1, 0.20)],    # 毁烬焚骨的大公：追加攻击伤害提高
+    "125": [("spd_pct", None, 2, 1, 0.06)],                # 烈阳惊雷的女武神：速度提高
+    "132": [("hp_pct", None, 2, 1, 0.12)],                 # 叩问天工的名冶：生命上限提高
+    "308": [("energy_regen", None, 2, 1, 0.05)],           # 生命的翁瓦克：能量恢复效率提高
+    "319": [("hp_pct", None, 2, 1, 0.12)],                 # 谧宁拾骨地：生命上限提高
+    "320": [("spd_pct", None, 2, 1, 0.06)],                # 渊思寂虑的巨树：速度提高
+}
+
+
+def apply_relic_set_panel_bonus(
+    base: BaseStats,
+    bonus: StatBonus,
+    set_counts: dict[str, int] | None,
+    set_effects: dict[str, dict] | None = None,
+) -> FinalStats:
+    """把遗器套装 2 件套的**无条件**属性写入局外面板。
+
+    Args:
+        base: 白色基础（与 compute_panel_breakdown 返回的一致）
+        bonus: 绿色加成，**会被直接修改**（调用方应作为面板绿字保存）
+        set_counts: {套装ID: 件数}；件数达到 2 才计入
+        set_effects: {套装ID: {"2": [参数...]}}（nanoka require_num），
+            缺失时使用各套装的缺省值
+
+    条件类效果（阈值 / 触发的 4 件套效果等）不在此处处理，由套装模块在战斗内挂载。
+    """
+    counts = set_counts or {}
+    effects = set_effects or {}
+    for set_id, entries in RELIC_SET_PANEL_BONUSES.items():
+        count = int(counts.get(str(set_id), 0) or 0)
+        if count <= 0:
+            continue
+        set_params = effects.get(str(set_id)) or {}
+        for field, element, pieces, index, default in entries:
+            if count < pieces:
+                continue
+            params = set_params.get(str(pieces)) or []
+            value = float(params[index - 1]) if 1 <= index <= len(params) else default
+            if field == "elemental_dmg_bonus":
+                key = element or "All"
+                bonus.elemental_dmg_bonus[key] = (
+                    bonus.elemental_dmg_bonus.get(key, 0.0) + value
+                )
+            else:
+                setattr(bonus, field, getattr(bonus, field) + value)
+    return StatCalculator(base=base, bonus=bonus).final()
+
+
 def compute_panel_breakdown(
     char_stats80: dict,
     relics: list[FreesrRelic],

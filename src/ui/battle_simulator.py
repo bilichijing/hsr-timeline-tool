@@ -56,15 +56,20 @@ from src.api.transforms import (
     transform_lightcone_detail,
 )
 from src.core.character_factory import (
-    GROWTH_STEPS,
     build_character_unit,
     convert_stats80,
-    extract_trace_bonuses,
+    make_preset_character,
 )
 from src.core.buff import BuffDuration
-from src.core.damage import DamageType, build_enemy_resistance
-from src.core.freesr import apply_lightcone_panel_bonus, compute_panel, compute_panel_breakdown, lightcone_base_stats, parse_freesr
-from src.core.stats import StatCalculator
+from src.core.damage import build_enemy_resistance
+from src.core.freesr import (
+    apply_lightcone_panel_bonus,
+    apply_relic_set_panel_bonus,
+    compute_panel_breakdown,
+    lightcone_base_stats,
+    parse_freesr,
+    parse_relic,
+)
 from src.core.simulator import (
     BattleEndReason,
     BattleSimulator,
@@ -74,12 +79,14 @@ from src.core.simulator import (
     EnemyState,
     PlayerAction,
 )
-from src.core.skill import Skill, SkillEffect, SkillType
+from src.core.skill import SkillType
 from src.core.stats import BaseStats, StatBonus
 from src.ui.theme import DARK_STYLE, Colors, ELEMENT_COLORS, PATH_COLORS
 from src.ui.widgets.character_picker import CharacterPickerDialog, ICONS_DIR, _load_character_icon
 from src.ui.widgets.damage_pie import DamagePieChartWidget
 from src.ui.widgets.enemy_target import EnemyTargetWidget
+from src.ui.widgets.lightcone_picker import LightconePickerDialog
+from src.ui.widgets.relic_config import RelicConfigDialog, relic_slot_summary
 from src.ui.widgets.sp_indicator import SPIndicatorWidget
 from src.ui.widgets.energy_orb import EnergyOrbWidget
 from src.ui.widgets.timeline_gantt import (
@@ -124,14 +131,15 @@ PREVIEW_AV_WINDOW = 300.0
 
 # ── 队伍表格行数据与列号 ──────────────────────────────────
 
-# 队伍表格列号（名称/光锥 + 12 项属性；命途/属性存于行数据供角色构建使用）
+# 队伍表格列号（名称 / 光锥 / 遗器 / 星魂 + 12 项属性；命途/属性存于行数据供角色构建使用）
 COL_NAME = 0
 COL_LIGHTCONE = 1
-COL_HP, COL_ATK, COL_DEF, COL_SPD = 2, 3, 4, 5
-COL_CRIT_RATE, COL_CRIT_DMG, COL_BREAK_EFFECT, COL_EFFECT_RES = 6, 7, 8, 9
-COL_ENERGY_REGEN, COL_EFFECT_HIT, COL_OUTGOING_HEAL, COL_DMG_BONUS = 10, 11, 12, 13
-COL_RANK = 14
-COL_COUNT = 15
+COL_RELIC = 2
+COL_RANK = 3
+COL_HP, COL_ATK, COL_DEF, COL_SPD = 4, 5, 6, 7
+COL_CRIT_RATE, COL_CRIT_DMG, COL_BREAK_EFFECT, COL_EFFECT_RES = 8, 9, 10, 11
+COL_ENERGY_REGEN, COL_EFFECT_HIT, COL_OUTGOING_HEAL, COL_DMG_BONUS = 12, 13, 14, 15
+COL_COUNT = 16
 
 # 百分比列（数值为小数，0.05 = 5%）
 PERCENT_COLUMNS = {
@@ -140,11 +148,10 @@ PERCENT_COLUMNS = {
 }
 
 TABLE_HEADERS = [
-    "名称", "光锥",
+    "名称", "光锥", "遗器", "星魂",
     "生命值", "攻击力", "防御力", "速度",
     "暴击率", "暴击伤害", "击破特攻", "效果抵抗",
     "能量恢复效率", "效果命中", "治疗量加成", "属性增伤",
-    "星魂",
 ]
 
 
@@ -259,19 +266,20 @@ class _RowCharData:
     skills_raw: dict = field(default_factory=dict)
     skill_trees_raw: dict = field(default_factory=dict)  # 原始行迹（行迹属性加成）
     loaded: bool = False                          # 真实详情是否已就绪
-    # freesr 导入数据（供未来套装效果/星魂使用）
+    # 装备/配置数据（freesr 导入或手动选择，二者共用同一套字段）
     sp_value: float = 0.0    # 初始能量（freesr sp_value）
-    rank: int = 0            # 星魂（freesr data.rank）
-    relics_raw: list = field(default_factory=list)     # freesr 原始遗器列表
+    rank: int = 0            # 星魂（freesr data.rank / 星魂列）
+    relics_raw: list = field(default_factory=list)     # 遗器原始 dict（freesr 格式，用 parse_relic 还原）
     lightcone_raw: list = field(default_factory=list)  # freesr 原始光锥列表
     lightcone_stats80: dict = field(default_factory=dict)  # 光锥 80 级基础（面板基础值显示用）
-    lightcone_name: str = ""    # 携带光锥名（freesr 导入后填写）
+    lightcone_name: str = ""    # 携带光锥名（freesr 导入或手动选择后填写）
     lightcone_id: str = ""      # 光锥 nanoka ID
-    lightcone_rank: int = 1     # 光锥叠影等级 1~5（freesr lightcones[].rank）
+    lightcone_rank: int = 1     # 光锥叠影等级 1~5
     lightcone_params: list = field(default_factory=list)  # 当前叠影参数列表
     lightcone_desc: str = ""    # 当前叠影效果描述（插值后，tooltip 用）
     relic_set_counts: dict = field(default_factory=dict)  # {套装ID: 件数}
     relic_set_effects: dict = field(default_factory=dict)  # {套装ID: {"2": [...], "4": [...]}}
+    relic_set_names: dict = field(default_factory=dict)    # {套装ID: 套装名}（显示用）
     panel_white_base: dict = field(default_factory=dict)  # 白字基础：hp/atk/def/spd
     panel_green_bonus: dict = field(default_factory=dict)  # 绿字加成：StatBonus 字段
     ranks_raw: dict = field(default_factory=dict)  # nanoka ranks 原始数据（星魂描述/参数）
@@ -407,98 +415,83 @@ class _FreesrLightconeWorker(QObject):
         return rows, failed
 
 
+class _LightconeDetailWorker(QObject):
+    """后台加载单个光锥详情（手动选择光锥时用，行号随信号回传）。"""
+
+    loaded = Signal(int, object)   # (row, payload)
+    failed = Signal(int, str)      # (row, error)
+
+    def __init__(self, lightcone_id: str, row: int) -> None:
+        super().__init__()
+        self.lightcone_id = str(lightcone_id)
+        self.row = row
+
+    def run(self) -> None:
+        try:
+            payload = run_in_loop(self._load())
+            self.loaded.emit(self.row, payload)
+        except Exception as e:
+            self.failed.emit(self.row, str(e))
+        finally:
+            QThread.currentThread().quit()
+
+    async def _load(self) -> dict:
+        raw = await fetch_lightcone_detail(self.lightcone_id)
+        info = transform_lightcone_detail(raw, self.lightcone_id)
+        refinement = info.refinement
+        return {
+            "lightcone_id": self.lightcone_id,
+            "name": info.name,
+            "stats80": pick_lightcone_stats80(info),
+            "refinement_levels": refinement.levels if refinement is not None else {},
+            "refinement_name": refinement.name if refinement is not None else "",
+            "refinement_desc": refinement.desc if refinement is not None else "",
+        }
+
+
+class _RelicSetDetailWorker(QObject):
+    """后台加载一组遗器套装详情（手动配置遗器时用，行号随信号回传）。"""
+
+    loaded = Signal(int, object, object)   # (row, {set_id: {"name","effects"}}, [失败 set_id])
+
+    def __init__(self, set_ids: list[int], row: int) -> None:
+        super().__init__()
+        self.set_ids = [int(s) for s in set_ids]
+        self.row = row
+
+    def run(self) -> None:
+        try:
+            rows, failed = run_in_loop(self._load())
+            self.loaded.emit(self.row, rows, failed)
+        except Exception as e:
+            self.loaded.emit(self.row, {}, [str(e)])
+        finally:
+            QThread.currentThread().quit()
+
+    async def _load(self) -> tuple[dict, list]:
+        rows: dict = {}
+        failed: list = []
+        for set_id in self.set_ids:
+            try:
+                raw = await fetch_relicset_detail(set_id)
+                require_num = raw.get("require_num") or {}
+                effects = {
+                    str(pieces): list(item.get("param_list") or [])
+                    for pieces, item in require_num.items()
+                    if isinstance(item, dict)
+                }
+                rows[str(set_id)] = {
+                    "name": raw.get("name", ""),
+                    "effects": effects,
+                }
+            except Exception:
+                failed.append(set_id)
+        return rows, failed
+
+
 # ── 预设角色构造 ──────────────────────────────────────────
-
-
-def make_preset_character(
-    unit_id: str,
-    name: str,
-    path: str,
-    element: str,
-    hp: float = 10000,
-    atk: float = 1000,
-    def_: float = 500,
-    spd: float = 100,
-    crit_rate: float = 0.05,
-    crit_dmg: float = 0.5,
-    break_effect: float = 0.0,
-    effect_hit: float = 0.0,
-    effect_res: float = 0.0,
-    energy_regen: float = 0.0,
-    outgoing_heal: float = 0.0,
-    dmg_bonus: float = 0.0,
-) -> CharacterUnit:
-    """构造预设角色（带普攻/战技/终结技）。"""
-    base = BaseStats(
-        hp_base=hp,
-        atk_base=atk,
-        def_base=def_,
-        spd_base=spd,
-        crit_rate=crit_rate,
-        crit_dmg=crit_dmg,
-        break_effect=break_effect,
-        effect_hit=effect_hit,
-        effect_res=effect_res,
-        energy_regen=energy_regen,
-        outgoing_heal=outgoing_heal,
-    )
-    bonus = StatBonus(dmg_bonus=dmg_bonus)
-
-    normal = Skill(
-        id=f"{unit_id}_normal",
-        name="普攻",
-        skill_type=SkillType.NORMAL,
-        sp_cost=-1,
-        energy_recover=20,
-        effects=[SkillEffect(
-            damage_type=DamageType.NORMAL,
-            multiplier=1.0,
-            toughness_damage=10,
-            element=element,
-        )],
-    )
-    skill = Skill(
-        id=f"{unit_id}_skill",
-        name="战技",
-        skill_type=SkillType.SKILL,
-        sp_cost=1,
-        energy_recover=30,
-        effects=[SkillEffect(
-            damage_type=DamageType.NORMAL,
-            multiplier=2.0,
-            toughness_damage=20,
-            element=element,
-        )],
-    )
-    ultra = Skill(
-        id=f"{unit_id}_ultra",
-        name="终结技",
-        skill_type=SkillType.ULTRA,
-        energy_cost=120,
-        effects=[SkillEffect(
-            damage_type=DamageType.NORMAL,
-            multiplier=4.0,
-            toughness_damage=30,
-            element=element,
-        )],
-    )
-
-    # 能量上限与终结技耗能对齐（否则能量永远无法达到耗能要求，放不出终结技）
-    base.energy_max = 120
-
-    return CharacterUnit(
-        unit_id=unit_id,
-        name=name,
-        path=path,
-        element=element,
-        base_stats=base,
-        bonus_stats=bonus,
-        skills={
-            normal.id: normal,
-            skill.id: skill,
-            ultra.id: ultra,
-        },
-    )
+# make_preset_character 已下沉到 core（src/core/character_factory.py），
+# 供桌面端与 Web 端共用；此处由上方 import 引入。
 
 
 # ── 卡片样式辅助 ──────────────────────────────────────────
@@ -715,7 +708,7 @@ class BattleSimulatorWindow(QMainWindow):
         layout.setSpacing(12)
 
         # 队伍配置
-        team_group = QGroupBox("队伍配置（双击名称列可选择角色）")
+        team_group = QGroupBox("队伍配置（双击 名称 / 光锥 / 遗器 列可分别选择）")
         team_layout = QVBoxLayout(team_group)
         import_row = QHBoxLayout()
         import_btn = QPushButton("导入 freesr-data.json")
@@ -730,15 +723,18 @@ class BattleSimulatorWindow(QMainWindow):
         # 全部列按内容自适应宽度
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setDefaultSectionSize(90)
-        # 表头 tooltip：百分比列注明显示格式；属性增伤注明适用角色自身属性
-        for col in range(2, COL_COUNT):
-            tip = TABLE_HEADERS[col]
+        # 表头 tooltip：装备列说明交互方式；百分比列注明显示格式；属性增伤注明适用属性
+        header_tips = {
+            COL_LIGHTCONE: "双击单元格选择光锥（可选叠影 1~5）；也可由 freesr 导入",
+            COL_RELIC: "双击单元格配置遗器（6 部位：套装 / 主词条 / 副词条）",
+            COL_RANK: "星魂等级 0~6（0=未激活）。鼠标悬停可查看当前星魂描述",
+        }
+        for col in range(1, COL_COUNT):
+            tip = header_tips.get(col, TABLE_HEADERS[col])
             if col in PERCENT_COLUMNS:
                 tip += "（百分数显示，保留 1 位小数）"
             if col == COL_DMG_BONUS:
                 tip += "（仅该角色自身属性）"
-            if col == COL_RANK:
-                tip = "星魂等级 0~6（0=未激活）。鼠标悬停可查看当前星魂描述"
             item = QTableWidgetItem(TABLE_HEADERS[col])
             item.setToolTip(tip)
             self.team_table.setHorizontalHeaderItem(col, item)
@@ -1178,23 +1174,375 @@ class BattleSimulatorWindow(QMainWindow):
     # ── 角色选择 ─────────────────────────────────────
 
     def _on_team_cell_double_clicked(self, row: int, column: int) -> None:
-        """双击队伍表格名称列，弹出角色选择器。"""
-        if column != 0:
-            return
+        """双击队伍表格：名称列选角色，光锥列选光锥，遗器列配置遗器。"""
+        if column == COL_NAME:
+            self._pick_character(row)
+        elif column == COL_LIGHTCONE:
+            self._pick_lightcone(row)
+        elif column == COL_RELIC:
+            self._configure_relics(row)
+
+    # ── 行数据读写 ──────────────────────────────────────
+
+    def _row_data(self, row: int) -> _RowCharData | None:
+        """读取某一行的行数据（行/单元格不存在返回 None）。"""
+        if row < 0 or row >= self.team_table.rowCount():
+            return None
+        item = self.team_table.item(row, COL_NAME)
+        if item is None:
+            return None
+        data = item.data(Qt.UserRole)
+        return data if isinstance(data, _RowCharData) else None
+
+    def _pick_character(self, row: int) -> None:
+        """双击名称列：选择角色（保留已配置的光锥与遗器）。"""
         picker = CharacterPickerDialog(self)
-        if picker.exec() == QDialog.Accepted and picker.selected_character:
-            c = picker.selected_character
-            name_item = QTableWidgetItem(c.name_zh or c.name_en)
-            # 名称列存储行角色数据（真实详情加载完成后回填）
-            name_item.setData(
-                Qt.UserRole,
-                _RowCharData(char_id=c.id, name=c.name_zh or c.name_en, path=c.path, element=c.element),
+        if picker.exec() != QDialog.Accepted or picker.selected_character is None:
+            return
+        c = picker.selected_character
+        prev = self._row_data(row)
+        row_data = _RowCharData(
+            char_id=c.id,
+            name=c.name_zh or c.name_en,
+            path=c.path,
+            element=c.element,
+        )
+        if prev is not None:
+            # 光锥/遗器与角色无关：换角色时保留，避免重复配置
+            row_data.lightcone_raw = list(prev.lightcone_raw)
+            row_data.lightcone_id = prev.lightcone_id
+            row_data.lightcone_name = prev.lightcone_name
+            row_data.lightcone_rank = prev.lightcone_rank
+            row_data.lightcone_params = list(prev.lightcone_params)
+            row_data.lightcone_desc = prev.lightcone_desc
+            row_data.lightcone_stats80 = dict(prev.lightcone_stats80)
+            row_data.relics_raw = list(prev.relics_raw)
+            row_data.relic_set_counts = dict(prev.relic_set_counts)
+            row_data.relic_set_effects = dict(prev.relic_set_effects)
+            row_data.relic_set_names = dict(prev.relic_set_names)
+
+        name_item = QTableWidgetItem(row_data.name)
+        # 名称列存储行角色数据（真实详情加载完成后回填）
+        name_item.setData(Qt.UserRole, row_data)
+        self.team_table.setItem(row, COL_NAME, name_item)
+        self._set_rank_cell(row, 0)
+        self._set_lightcone_cell(row, self._lightcone_cell_text(row_data), row_data.lightcone_desc)
+        self._set_relic_cell(row, row_data)
+        self._update_element_bonus_tooltips()
+        # 异步加载真实详情（技能/面板自动填充）
+        self._start_detail_load(row, c.id)
+
+    # ── 光锥选择 ────────────────────────────────────────
+
+    @staticmethod
+    def _lightcone_cell_text(row_data: _RowCharData) -> str:
+        """光锥列显示文本（未装备时为空字符串）。"""
+        name = row_data.lightcone_name
+        if not name:
+            return ""
+        rank = max(1, min(5, int(row_data.lightcone_rank or 1)))
+        return f"{name}（{rank} 叠影）"
+
+    def _pick_lightcone(self, row: int) -> None:
+        """双击光锥列：选择光锥与叠影等级，随后异步加载详情并重算面板。"""
+        row_data = self._row_data(row)
+        if row_data is None:
+            QMessageBox.information(self, "选择光锥", "请先在该行选择角色")
+            return
+        picker = LightconePickerDialog(
+            self,
+            current_id=row_data.lightcone_id,
+            current_rank=row_data.lightcone_rank,
+        )
+        if picker.exec() != QDialog.Accepted:
+            return
+
+        picked = picker.selected_lightcone
+        if picked is None:
+            # 不装备：清空光锥相关数据后按角色基础 + 遗器重算
+            row_data.lightcone_id = ""
+            row_data.lightcone_name = ""
+            row_data.lightcone_rank = 1
+            row_data.lightcone_params = []
+            row_data.lightcone_desc = ""
+            row_data.lightcone_stats80 = {}
+            row_data.lightcone_raw = []
+            self._set_lightcone_cell(row, self._lightcone_cell_text(row_data), "")
+            self._apply_row_panel(row)
+            return
+
+        row_data.lightcone_id = str(picked.id)
+        row_data.lightcone_name = picked.name_zh or picked.name_en or str(picked.id)
+        row_data.lightcone_rank = max(1, min(5, int(picker.selected_rank)))
+        row_data.lightcone_raw = [{
+            "equip_avatar": row_data.char_id,
+            "item_id": int(picked.id),
+            "level": 80,
+            "promotion": 6,
+            "rank": row_data.lightcone_rank,
+        }]
+        self._set_lightcone_cell(
+            row, self._lightcone_cell_text(row_data), "正在加载光锥详情…"
+        )
+        self._start_lightcone_detail_load(row, row_data.lightcone_id)
+
+    def _start_lightcone_detail_load(self, row: int, lightcone_id: str) -> None:
+        """启动单行光锥详情加载线程（一次性，finished 后自动回收）。"""
+        if not hasattr(self, "_manual_lc_threads"):
+            self._manual_lc_threads: dict[int, QThread] = {}
+            self._manual_lc_workers: dict[int, QObject] = {}
+        thread = QThread()
+        worker = _LightconeDetailWorker(lightcone_id, row)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.loaded.connect(self._on_lightcone_detail_loaded)
+        worker.failed.connect(self._on_lightcone_detail_failed)
+        thread.finished.connect(thread.deleteLater)
+        self._manual_lc_threads[row] = thread
+        self._manual_lc_workers[row] = worker
+
+        def _cleanup(r: int = row) -> None:
+            self._manual_lc_threads.pop(r, None)
+            self._manual_lc_workers.pop(r, None)
+
+        thread.finished.connect(_cleanup)
+        thread.start()
+
+    def _on_lightcone_detail_loaded(self, row: int, payload: dict) -> None:
+        """光锥详情就绪：写入叠影参数与 80 级基础值后重算面板。"""
+        row_data = self._row_data(row)
+        if row_data is None or not payload:
+            return
+        if str(payload.get("lightcone_id", "")) != str(row_data.lightcone_id):
+            return  # 期间又换了光锥，丢弃旧结果
+
+        levels = payload.get("refinement_levels") or {}
+        rank = max(1, min(5, int(row_data.lightcone_rank or 1)))
+        row_data.lightcone_rank = rank
+        row_data.lightcone_params = list(levels.get(str(rank), []))
+        ref_name = payload.get("refinement_name", "")
+        ref_desc = clean_text(payload.get("refinement_desc", ""), row_data.lightcone_params)
+        if ref_desc and ref_name:
+            ref_desc = f"{ref_name}：{ref_desc}"
+        row_data.lightcone_desc = ref_desc
+        row_data.lightcone_name = payload.get("name") or row_data.lightcone_name
+        row_data.lightcone_stats80 = payload.get("stats80") or {}
+        self._set_lightcone_cell(row, self._lightcone_cell_text(row_data), ref_desc)
+        self._apply_row_panel(row)
+
+    def _on_lightcone_detail_failed(self, row: int, err: str) -> None:
+        """光锥详情加载失败：基础属性按 0 处理并提示。"""
+        row_data = self._row_data(row)
+        name = row_data.lightcone_name if row_data is not None else ""
+        QMessageBox.warning(
+            self, "光锥数据加载失败",
+            f"第 {row + 1} 行光锥「{name}」详情加载失败：{err}\n其基础属性按 0 处理",
+        )
+        if row_data is not None:
+            row_data.lightcone_stats80 = {}
+            row_data.lightcone_params = []
+            self._apply_row_panel(row)
+
+    # ── 遗器配置 ────────────────────────────────────────
+
+    def _configure_relics(self, row: int) -> None:
+        """双击遗器列：配置 6 部位遗器，随后异步加载套装效果并重算面板。"""
+        row_data = self._row_data(row)
+        if row_data is None:
+            QMessageBox.information(self, "遗器配置", "请先在该行选择角色")
+            return
+
+        current = [
+            parse_relic(raw)
+            for raw in row_data.relics_raw
+            if isinstance(raw, dict)
+        ]
+        dlg = RelicConfigDialog(
+            self,
+            relics=current,
+            set_names=row_data.relic_set_names,
+            char_name=row_data.name,
+            char_id=row_data.char_id,
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        new_relics = dlg.result_relics()
+        row_data.relics_raw = [relic.raw for relic in new_relics]
+        row_data.relic_set_names = dlg.result_set_names()
+        counts: dict[str, int] = {}
+        for relic in new_relics:
+            key = str(relic.relic_set_id)
+            counts[key] = counts.get(key, 0) + 1
+        row_data.relic_set_counts = counts
+        # 只保留仍在使用的套装效果
+        row_data.relic_set_effects = {
+            set_id: effects
+            for set_id, effects in row_data.relic_set_effects.items()
+            if set_id in counts
+        }
+        self._set_relic_cell(row, row_data)
+
+        missing = [int(set_id) for set_id in counts if set_id not in row_data.relic_set_effects]
+        if missing:
+            self._start_relicset_detail_load(row, missing)
+        else:
+            self._apply_row_panel(row)
+
+    def _start_relicset_detail_load(
+        self,
+        row: int,
+        set_ids: list[int],
+        *,
+        refresh_panel: bool = True,
+    ) -> None:
+        """启动单行遗器套装详情加载线程（一次性，finished 后自动回收）。
+
+        Args:
+            refresh_panel: True = 详情就绪后重算面板（用户改动装备时）；
+                False = 只补全套装名 / 效果参数与列显示（读档时修复旧缓存用，
+                避免覆盖用户手工微调过的面板数值）。
+        """
+        if not hasattr(self, "_manual_relic_threads"):
+            self._manual_relic_threads: dict[int, QThread] = {}
+            self._manual_relic_workers: dict[int, QObject] = {}
+        thread = QThread()
+        worker = _RelicSetDetailWorker(set_ids, row)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.loaded.connect(
+            lambda r, rows, failed, rp=refresh_panel: self._on_relicset_detail_loaded(
+                r, rows, failed, refresh_panel=rp
             )
-            self.team_table.setItem(row, 0, name_item)
-            self._set_rank_cell(row, 0)
-            self._update_element_bonus_tooltips()
-            # 异步加载真实详情（技能/面板自动填充）
-            self._start_detail_load(row, c.id)
+        )
+        thread.finished.connect(thread.deleteLater)
+        self._manual_relic_threads[row] = thread
+        self._manual_relic_workers[row] = worker
+
+        def _cleanup(r: int = row) -> None:
+            self._manual_relic_threads.pop(r, None)
+            self._manual_relic_workers.pop(r, None)
+
+        thread.finished.connect(_cleanup)
+        thread.start()
+
+    def _on_relicset_detail_loaded(
+        self,
+        row: int,
+        rows: dict,
+        failed: list,
+        *,
+        refresh_panel: bool = True,
+    ) -> None:
+        """遗器套装详情就绪：写入套装名与效果参数，必要时重算面板。"""
+        row_data = self._row_data(row)
+        if row_data is None:
+            return
+        for set_id, info in (rows or {}).items():
+            key = str(set_id)
+            if key not in row_data.relic_set_counts:
+                continue  # 已经不在配置中的套装
+            effects = info.get("effects")
+            row_data.relic_set_effects[key] = effects if isinstance(effects, dict) else {}
+            name = info.get("name")
+            if name:
+                row_data.relic_set_names[key] = name
+        self._set_relic_cell(row, row_data)
+        if refresh_panel:
+            self._apply_row_panel(row)
+        if failed and refresh_panel:
+            QMessageBox.warning(
+                self, "遗器套装数据加载失败",
+                f"以下遗器套装详情加载失败，其效果暂不生效：{failed}",
+            )
+
+    def _set_relic_cell(self, row: int, row_data: _RowCharData | None) -> None:
+        """写入遗器列（显示套装名与件数，tooltip 给出各部位明细）。"""
+        counts = (row_data.relic_set_counts if row_data is not None else None) or {}
+        if not counts:
+            item = QTableWidgetItem("未配置")
+            # 只读：双击交给 _configure_relics 处理，不进入文本编辑
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            item.setToolTip("双击该单元格配置遗器（6 部位：套装 / 主词条 / 副词条）")
+            self.team_table.setItem(row, COL_RELIC, item)
+            return
+
+        names = row_data.relic_set_names or {}
+        detail_lines = [
+            relic_slot_summary(relic, names.get(str(relic.relic_set_id), ""))
+            for relic in (parse_relic(raw) for raw in row_data.relics_raw if isinstance(raw, dict))
+        ]
+        item = QTableWidgetItem(self._relic_cell_text(row_data))
+        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        item.setToolTip("\n".join(detail_lines) or "双击可重新配置遗器")
+        self.team_table.setItem(row, COL_RELIC, item)
+
+    @staticmethod
+    def _relic_cell_text(row_data: _RowCharData) -> str:
+        """遗器列文本：套装名×件数（套装名未知时回退套装编号）。"""
+        counts = row_data.relic_set_counts or {}
+        if not counts:
+            return "未配置"
+        names = row_data.relic_set_names or {}
+        ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        return " · ".join(
+            f"{names.get(str(set_id)) or set_id}×{count}" for set_id, count in ordered
+        )
+
+    def _apply_row_panel(self, row: int) -> bool:
+        """按行数据重算并写入 12 个面板列（角色基础 + 行迹 + 遗器 + 光锥）。
+
+        统一入口：角色详情加载完成、选择光锥、配置遗器、freesr 导入都走这里，
+        保证「白字 / 绿字」拆分与最终面板始终一致。
+
+        Returns:
+            True 已计算；False 表示角色详情尚未就绪（跳过）
+        """
+        row_data = self._row_data(row)
+        if row_data is None or not row_data.stats80:
+            return False
+
+        relics = [
+            parse_relic(raw) for raw in row_data.relics_raw if isinstance(raw, dict)
+        ]
+        lc_stats80 = row_data.lightcone_stats80 or None
+        white_base, green_bonus, _final = compute_panel_breakdown(
+            row_data.stats80,
+            relics,
+            lc_stats80,
+            row_data.skill_trees_raw,
+        )
+        # 光锥第一句“使装备者 xx 提高”的常驻加成写入局外面板（战斗内不重复挂载）
+        final = apply_lightcone_panel_bonus(
+            white_base, green_bonus,
+            row_data.lightcone_id, row_data.lightcone_params,
+        )
+        # 遗器套装 2 件套的无条件属性（生命上限 / 速度 / 回能 …）同样进面板；
+        # 带阈值或触发条件的部分只在战斗内由套装模块挂载
+        final = apply_relic_set_panel_bonus(
+            white_base, green_bonus,
+            row_data.relic_set_counts, row_data.relic_set_effects,
+        )
+        row_data.panel_white_base = {
+            "hp": white_base.hp_base,
+            "atk": white_base.atk_base,
+            "def": white_base.def_base,
+            "spd": white_base.spd_base,
+        }
+        row_data.panel_green_bonus = asdict(green_bonus)
+        self._set_cell_value(row, COL_HP, int(final.hp))
+        self._set_cell_value(row, COL_ATK, int(final.atk))
+        self._set_cell_value(row, COL_DEF, int(final.defense))
+        self._set_cell_value(row, COL_SPD, final.spd)
+        self._set_cell_value(row, COL_CRIT_RATE, final.crit_rate)
+        self._set_cell_value(row, COL_CRIT_DMG, final.crit_dmg)
+        self._set_cell_value(row, COL_BREAK_EFFECT, final.break_effect)
+        self._set_cell_value(row, COL_EFFECT_RES, final.effect_res)
+        self._set_cell_value(row, COL_ENERGY_REGEN, final.energy_regen)
+        self._set_cell_value(row, COL_EFFECT_HIT, final.effect_hit)
+        self._set_cell_value(row, COL_OUTGOING_HEAL, final.outgoing_heal)
+        self._set_cell_value(row, COL_DMG_BONUS, final.dmg_bonus)
+        return True
 
     # ── 详情异步加载 ────────────────────────────────────
 
@@ -1248,31 +1596,8 @@ class BattleSimulatorWindow(QMainWindow):
         # 星魂等级保持原值（freesr 可能先于详情导入），仅刷新描述 tooltip
         self._set_rank_cell(row, row_data.rank)
 
-        # 自动填充面板列（角色基础 + 行迹加成 = 游戏面板最终值；
-        # 行迹是常驻加成而非 buff，用户可手动修改表格模拟遗器加成）
-        s = row_data.stats80
-        base = convert_stats80(s)
-        trace = extract_trace_bonuses(row_data.skill_trees_raw)
-        final = StatCalculator(base=base, bonus=trace).final()
-        row_data.panel_white_base = {
-            "hp": base.hp_base,
-            "atk": base.atk_base,
-            "def": base.def_base,
-            "spd": base.spd_base,
-        }
-        row_data.panel_green_bonus = asdict(trace)
-        self._set_cell_value(row, COL_HP, int(final.hp))
-        self._set_cell_value(row, COL_ATK, int(final.atk))
-        self._set_cell_value(row, COL_DEF, int(final.defense))
-        self._set_cell_value(row, COL_SPD, final.spd)
-        self._set_cell_value(row, COL_CRIT_RATE, final.crit_rate)
-        self._set_cell_value(row, COL_CRIT_DMG, final.crit_dmg)
-        self._set_cell_value(row, COL_BREAK_EFFECT, final.break_effect)
-        self._set_cell_value(row, COL_EFFECT_RES, final.effect_res)
-        self._set_cell_value(row, COL_ENERGY_REGEN, final.energy_regen)
-        self._set_cell_value(row, COL_EFFECT_HIT, final.effect_hit)
-        self._set_cell_value(row, COL_OUTGOING_HEAL, final.outgoing_heal)
-        self._set_cell_value(row, COL_DMG_BONUS, final.dmg_bonus)
+        # 面板列：角色基础 + 行迹（+ 已配置的遗器 / 光锥）统一由 _apply_row_panel 计算
+        self._apply_row_panel(row)
 
         # freesr 导入时序钩子：详情加载完成时补填已导入行的最终面板
         job = getattr(self, "_freesr_job", None)
@@ -1360,10 +1685,17 @@ class BattleSimulatorWindow(QMainWindow):
         spin.setToolTip(f"{rank}魂 · {name}\n{desc}".strip())
 
     def _set_lightcone_cell(self, row: int, name: str, desc: str = "") -> None:
-        """写入光锥列（携带光锥名与叠影描述 tooltip）。"""
-        item = QTableWidgetItem(name)
-        if desc:
+        """写入光锥列（未装备显示占位；携带光锥名与叠影描述 tooltip）。"""
+        text = name or "未装备"
+        item = QTableWidgetItem(text)
+        # 只读：双击交给 _pick_lightcone 处理，不进入文本编辑
+        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        if name and desc:
             item.setToolTip(f"{name}\n{desc}")
+        elif name:
+            item.setToolTip(f"{name}\n双击可重新选择光锥与叠影等级")
+        else:
+            item.setToolTip("双击该单元格选择光锥（可选叠影 1~5）")
         self.team_table.setItem(row, COL_LIGHTCONE, item)
 
     def _update_element_bonus_tooltips(self) -> None:
@@ -1489,6 +1821,7 @@ class BattleSimulatorWindow(QMainWindow):
                 relic_counts[set_id] = relic_counts.get(set_id, 0) + 1
             row_data.relic_set_counts = relic_counts
             row_data.relic_set_effects = {}
+            row_data.relic_set_names = {}
             row_data.lightcone_raw = [
                 lc.raw for lc in profile.lightcones.get(char_id, [])
             ]
@@ -1593,32 +1926,30 @@ class BattleSimulatorWindow(QMainWindow):
             )
 
     def _fill_freesr_panels(self) -> None:
-        """为已就绪的匹配行计算并填写最终面板（幂等，可多次调用）。"""
+        """为已就绪的匹配行写入装备（光锥 / 遗器）并计算最终面板（幂等）。"""
         job = getattr(self, "_freesr_job", None)
         if not job:
             return
         profile = job["profile"]
         for row, char_id in job["matched"]:
-            name_item = self.team_table.item(row, 0)
-            if name_item is None:
-                continue
-            row_data = name_item.data(Qt.UserRole)
-            if not isinstance(row_data, _RowCharData) or not row_data.stats80:
+            row_data = self._row_data(row)
+            if row_data is None or not row_data.stats80:
                 continue  # 详情未就绪，等待 _on_detail_loaded 钩子补调
 
-            # 光锥 80 级行（缺失按 0 处理；同时存入行数据供面板基础值显示与光锥名展示）
-            lc_stats80 = None
+            # 光锥：名称 / 叠影参数 / 80 级基础值（缺失按 0 处理）
             lcs = profile.lightcones.get(char_id, [])
             row_data.lightcone_id = ""
             row_data.lightcone_rank = 1
             row_data.lightcone_params = []
             row_data.lightcone_name = ""
+            row_data.lightcone_desc = ""
+            row_data.lightcone_stats80 = {}
             if lcs:
                 item_id = lcs[0].item_id
                 lc_info = job["lightcone_rows"].get(item_id) or {}
-                lc_stats80 = lc_info.get("stats80")
+                row_data.lightcone_stats80 = lc_info.get("stats80") or {}
                 row_data.lightcone_name = lc_info.get("name", "")
-                row_data.lightcone_id = str(lcs[0].item_id)
+                row_data.lightcone_id = str(item_id)
                 row_data.lightcone_rank = max(1, min(5, int(lcs[0].rank)))
                 levels = lc_info.get("refinement_levels") or {}
                 row_data.lightcone_params = list(
@@ -1626,54 +1957,27 @@ class BattleSimulatorWindow(QMainWindow):
                 )
                 lc_desc = lc_info.get("refinement_desc", "")
                 lc_name = lc_info.get("refinement_name", "")
-                row_data.lightcone_desc = clean_text(
-                    lc_desc, row_data.lightcone_params
-                )
+                row_data.lightcone_desc = clean_text(lc_desc, row_data.lightcone_params)
                 if row_data.lightcone_desc and lc_name:
                     row_data.lightcone_desc = f"{lc_name}：{row_data.lightcone_desc}"
-            row_data.lightcone_stats80 = lc_stats80 or {}
             self._set_lightcone_cell(
-                row, row_data.lightcone_name, row_data.lightcone_desc,
+                row, self._lightcone_cell_text(row_data), row_data.lightcone_desc,
             )
 
-            # 遗器套装效果参数（nanoka require_num）
+            # 遗器套装效果参数（nanoka require_num）与套装名
             row_data.relic_set_effects = {}
             for set_id in row_data.relic_set_counts:
                 info = job.get("relicset_rows", {}).get(set_id) or {}
                 effects = info.get("effects")
                 if isinstance(effects, dict):
                     row_data.relic_set_effects[set_id] = effects
+                name = info.get("name")
+                if name:
+                    row_data.relic_set_names[set_id] = name
+            self._set_relic_cell(row, row_data)
 
-            white_base, green_bonus, final = compute_panel_breakdown(
-                row_data.stats80,
-                profile.relics.get(char_id, []),
-                lc_stats80,
-                row_data.skill_trees_raw,
-            )
-            # 光锥第一句“使装备者 xx 提高”的常驻加成写入局外面板
-            final = apply_lightcone_panel_bonus(
-                white_base, green_bonus,
-                row_data.lightcone_id, row_data.lightcone_params,
-            )
-            row_data.panel_white_base = {
-                "hp": white_base.hp_base,
-                "atk": white_base.atk_base,
-                "def": white_base.def_base,
-                "spd": white_base.spd_base,
-            }
-            row_data.panel_green_bonus = asdict(green_bonus)
-            self._set_cell_value(row, COL_HP, int(final.hp))
-            self._set_cell_value(row, COL_ATK, int(final.atk))
-            self._set_cell_value(row, COL_DEF, int(final.defense))
-            self._set_cell_value(row, COL_SPD, final.spd)
-            self._set_cell_value(row, COL_CRIT_RATE, final.crit_rate)
-            self._set_cell_value(row, COL_CRIT_DMG, final.crit_dmg)
-            self._set_cell_value(row, COL_BREAK_EFFECT, final.break_effect)
-            self._set_cell_value(row, COL_EFFECT_RES, final.effect_res)
-            self._set_cell_value(row, COL_ENERGY_REGEN, final.energy_regen)
-            self._set_cell_value(row, COL_EFFECT_HIT, final.effect_hit)
-            self._set_cell_value(row, COL_OUTGOING_HEAL, final.outgoing_heal)
-            self._set_cell_value(row, COL_DMG_BONUS, final.dmg_bonus)
+            # 面板：角色基础 + 行迹 + 遗器 + 光锥（含第一句常驻加成）
+            self._apply_row_panel(row)
 
     # ── 默认配置 ─────────────────────────────────────
 
@@ -1705,6 +2009,9 @@ class BattleSimulatorWindow(QMainWindow):
             for col in (COL_BREAK_EFFECT, COL_EFFECT_RES, COL_ENERGY_REGEN,
                         COL_EFFECT_HIT, COL_OUTGOING_HEAL, COL_DMG_BONUS):
                 self._set_cell_value(row, col, 0.0)
+            # 装备列占位提示（可双击配置）
+            self._set_lightcone_cell(row, "")
+            self._set_relic_cell(row, None)
         self._update_element_bonus_tooltips()
 
     # ── 配置缓存 ─────────────────────────────────────
@@ -1730,7 +2037,7 @@ class BattleSimulatorWindow(QMainWindow):
             rows.append(entry)
 
         data = {
-            "version": 4,
+            "version": 6,
             "rows": rows,
             "enemy": {
                 "count": self.enemy_count_spin.value(),
@@ -1767,7 +2074,11 @@ class BattleSimulatorWindow(QMainWindow):
     def _load_config(self) -> None:
         """加载缓存配置（存在且可解析时覆盖默认配置）。
 
-        旧版本（13 列，无光锥列）队伍缓存自动迁移：属性列号 +1。
+        队伍列迁移（星魂列在遗器列之后）：
+        - version 6：当前格式（名称 / 光锥 / 遗器 / 星魂 / 12 属性），直接读取；
+        - version 5：星魂在最后一列，属性列号 +1；
+        - version 2~4：15 列（无遗器列、星魂在最后），属性列号 +2；
+        - 更早的列表格式（13 列，无光锥与遗器列），属性列号 +3。
         其余配置（怪物/战斗参数/技能等级）为尽力加载，损坏字段回退默认。
         """
         if not CONFIG_PATH.exists():
@@ -1786,15 +2097,36 @@ class BattleSimulatorWindow(QMainWindow):
             except (TypeError, ValueError):
                 return default
 
+        def _shift_cells(entries: list, offset: int, from_col: int) -> None:
+            """把 cells 中列号 >= from_col 的键整体右移 offset。"""
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                cells = entry.get("cells")
+                if not isinstance(cells, dict):
+                    continue
+                shifted: dict[int, object] = {}
+                for key, value in cells.items():
+                    try:
+                        col = int(key)
+                    except (TypeError, ValueError):
+                        continue
+                    shifted[col + offset if col >= from_col else col] = value
+                entry["cells"] = shifted
+
         # ── 队伍表格 ──────────────────────────────
-        if data.get("version") in (2, 3, 4) and isinstance(data.get("rows"), list):
+        version = data.get("version")
+        if version == 6 and isinstance(data.get("rows"), list):
             rows = data["rows"]
+        elif version == 5 and isinstance(data.get("rows"), list):
+            rows = data["rows"]
+            _shift_cells(rows, 1, from_col=3)   # 星魂列前移到遗器之后
+        elif version in (2, 3, 4) and isinstance(data.get("rows"), list):
+            rows = data["rows"]
+            _shift_cells(rows, 2, from_col=2)   # 插入遗器列 + 星魂列前移
         else:
-            # 旧格式（13 列）：属性列号整体 +1（插入光锥列）
             rows = data if isinstance(data, list) else []
-            for entry in rows:
-                cells = entry.get("cells", {})
-                entry["cells"] = {int(k) + 1: v for k, v in cells.items()}
+            _shift_cells(rows, 3, from_col=1)   # 插入光锥列 + 遗器列 + 星魂列前移
         for i, entry in enumerate(rows[: self.team_table.rowCount()]):
             name_item = QTableWidgetItem(entry.get("name", ""))
             rd_raw = entry.get("row_data")
@@ -1809,6 +2141,8 @@ class BattleSimulatorWindow(QMainWindow):
             self.team_table.setItem(i, 0, name_item)
             for col, text in entry.get("cells", {}).items():
                 col_int = int(col)
+                if col_int <= 0 or col_int >= COL_COUNT:
+                    continue
                 # 旧缓存百分比列为小数文本，迁移为百分数显示
                 if col_int in PERCENT_COLUMNS and "%" not in str(text):
                     try:
@@ -1820,6 +2154,22 @@ class BattleSimulatorWindow(QMainWindow):
             # 星魂等级：优先条目级 rank 字段，其次行数据（兼容旧缓存）
             rank_value = _int(entry.get("rank"), _int(rd.rank, 0))
             self._set_rank_cell(i, rank_value)
+            # 遗器列按当前数据刷新（旧缓存可能只存了套装编号文本）
+            if rd.relic_set_counts:
+                self._set_relic_cell(i, rd)
+                # 套装名 / 效果参数缺失时异步补全（只补显示，不重算面板）
+                missing = [
+                    int(set_id) for set_id in rd.relic_set_counts
+                    if str(set_id) not in rd.relic_set_names
+                    or str(set_id) not in rd.relic_set_effects
+                ]
+                if missing:
+                    self._start_relicset_detail_load(i, missing, refresh_panel=False)
+            # 光锥 / 遗器列恢复为只读（双击走选择器，不进入文本编辑）
+            for col in (COL_LIGHTCONE, COL_RELIC):
+                item = self.team_table.item(i, col)
+                if item is not None:
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
         self._update_element_bonus_tooltips()
 
         # ── 怪物配置 ──────────────────────────────
@@ -2085,6 +2435,19 @@ class BattleSimulatorWindow(QMainWindow):
                     char.base_stats.atk_base = cell_float(row, COL_ATK, char.base_stats.atk_base)
                     char.base_stats.def_base = cell_float(row, COL_DEF, char.base_stats.def_base)
                     char.base_stats.spd_base = cell_float(row, COL_SPD, char.base_stats.spd_base)
+
+                # 面板绿字里没有对应表格列的字段（分属性增伤 / 追加攻击增伤）
+                # 直接从绿字带进战斗，避免这些套装/光锥效果丢失
+                if green:
+                    char.bonus_stats.elemental_dmg_bonus = dict(
+                        green.get("elemental_dmg_bonus") or {}
+                    )
+                    char.bonus_stats.follow_up_dmg_bonus = float(
+                        green.get("follow_up_dmg_bonus", 0.0) or 0.0
+                    )
+                    char.bonus_stats.follow_up_crit_dmg_bonus = float(
+                        green.get("follow_up_crit_dmg_bonus", 0.0) or 0.0
+                    )
 
                 char.base_stats.crit_rate = cell_float(row, COL_CRIT_RATE, char.base_stats.crit_rate)
                 char.base_stats.crit_dmg = cell_float(row, COL_CRIT_DMG, char.base_stats.crit_dmg)
