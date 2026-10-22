@@ -1,9 +1,16 @@
 # 崩坏：星穹铁道 排轴与伤害计算工具
 
-> 项目代号 `hsr-timeline-tool` · 本地桌面应用（PySide6 + Python）
+> 项目代号 `hsr-timeline-tool` · **桌面端（PySide6）+ Web 端（纯 Python 标准库后端 + 原生 ES Module 前端）**
 > 一个面向《崩坏：星穹铁道》的**行动值（AV）排轴 / 战斗模拟 / 伤害计算**工具。
 
 数据源为 [nanoka](https://static.nanoka.cc)（`static.nanoka.cc`），核心是 AV 行动值系统与事件钩子驱动的战斗模拟引擎：可以配置 4 人队伍与 1~5 个敌方木桩，逐步推进战斗、随时插入终结技，并实时查看每段伤害、韧性击破、buff 与 AV 时间轴。
+
+两套界面共享同一个 `src/core` 计算内核与 `src/api` 数据层，功能一一对应：
+
+| 前端 | 入口 | 技术栈 |
+|---|---|---|
+| 桌面端 | `python ui_main.py` | PySide6 6.x 原生窗口 |
+| Web 端 | `python web_main.py` | Python 标准库 HTTP 服务 + 浏览器原生 ES Module（**零 Node / 零前端框架 / 无构建步骤**） |
 
 ---
 
@@ -11,6 +18,7 @@
 
 - [功能特性](#功能特性)
 - [界面总览](#界面总览)
+- [Web 前端](#web-前端)
 - [环境要求](#环境要求)
 - [安装](#安装)
 - [运行](#运行)
@@ -36,14 +44,15 @@
 - **敌方模型**：1~5 个木桩（共享韧性 / 弱点 / 等级 / 抗性 / 生命），支持配置"敌方攻击调度"，按总行动值强制攻击指定角色并回能。
 - **结果分析**：AV 甘特时间轴（滚轮缩放 / 拖动平移）、伤害占比饼图、逐段伤害明细、队伍与敌人汇总。
 - **角色机制模块化**：新角色通过事件钩子模块接入（`src/core/characters/`），无需改动模拟器核心。
+- **双前端同源**：桌面端与 Web 端共用 `src/core`（AV / 伤害 / Buff / 模拟器）与 `src/api`（nanoka 数据 + 缓存），同一份队伍配置在两端算出的面板与战斗结果一致。
 
 ## 界面总览
 
-主窗口为侧栏 + 7 个 Tab：
+两端界面结构一致：侧栏（队伍 / SP / 敌人 / 300 AV 预览）+ 7 个 Tab。
 
 | # | Tab | 内容 |
 |---|---|---|
-| 0 | ⚙ 配置 | 队伍表格（16 列：名称 / 光锥 / 遗器 / 星魂 + 12 项属性；双击前三列分别选择角色、光锥、遗器）、全局技能等级、敌方木桩、战斗参数、敌方攻击调度、freesr 导入 |
+| 0 | ⚙ 配置 | 队伍表格（16 列：名称 / 光锥 / 遗器 / 星魂 + 12 项属性；点击前三列分别选择角色、光锥、遗器）、全局技能等级、敌方木桩、战斗参数、敌方攻击调度、freesr 导入 |
 | 1 | ▶ 交互模拟 | 能量球、SP 指示器、敌人卡片、推进 / 普攻 / 战技 / 终结技按钮、快照回溯 |
 | 2 | ☰ 行动日志 | 回合 / AV / 总行动值 / 行动者 / 操作 / 伤害明细 / 总伤害 / 备注 |
 | 3 | ◔ AV 时间轴 | 各单位行动点甘特图（滚轮缩放、拖动平移、悬停详情） |
@@ -53,10 +62,24 @@
 
 侧栏还有"未来 300 AV 行动预览"：基于当前行动队列的静态推演，实际推拉条与速度变化以结算为准。
 
+## Web 前端
+
+```bash
+python web_main.py                 # 默认 http://127.0.0.1:8765/
+python web_main.py --open          # 启动后自动打开浏览器
+python web_main.py --port 9000     # 换端口
+python web_main.py --host 0.0.0.0  # 局域网可访问（注意：本机工具无鉴权）
+```
+
+- **技术栈**：后端是 Python 标准库 `http.server`（多线程 + JSON API，**不引入 FastAPI / Flask**）；前端是原生 ES Module + 手写 CSS（**无 Node、无构建步骤、无 CDN 依赖**），甘特图与饼图用 Canvas / SVG 手绘。因此 Web 端不需要额外安装任何依赖，装好桌面端依赖即可运行。
+- **状态**：后端持有唯一会话（单用户本地工具），所有写操作都返回完整状态；队伍配置与参数自动保存到 `./cache/web_state.json`（与桌面端的 `team_config.json` 互不影响）。
+- **功能对齐**：角色 / 光锥 / 遗器选择器、freesr 导入、敌方攻击调度、交互模拟（推进 / 普攻 / 战技 / 终结技插队 / 回溯）、行动日志、AV 甘特图、伤害占比、伤害明细、汇总卡片全部具备；键盘快捷键同样为 `空格` / `Q` / `E` / `1~4`。
+- **图标**：直接引用 nanoka 静态资源 URL（浏览器加载），后端不再落盘图标。
+
 ## 环境要求
 
 - **Python ≥ 3.10**（开发环境实测 Python 3.12.4）
-- **PySide6 ≥ 6.7**（需要 QtCharts，随 PySide6 提供）
+- **PySide6 ≥ 6.7**（桌面端；Web 端不需要 PySide6，但同一环境装好后两者都能跑）
 - 依赖见 [`pyproject.toml`](pyproject.toml)：
 
 | 依赖 | 用途 |
@@ -98,13 +121,13 @@ python ui_main.py
 
 ## 使用流程
 
-1. **配置队伍**：在"⚙ 配置"页**双击名称列**选择角色、**双击光锥列**选择光锥与叠影等级、**双击遗器列**配置 6 个部位（套装 / 主词条 / 副词条）。也可以点"导入 freesr-data.json"一次性导入角色面板、遗器与光锥。
+1. **配置队伍**：在"⚙ 配置"页点击名称列的「选」选择角色、点击光锥列选择光锥与叠影等级、点击遗器列配置 6 个部位（套装 / 主词条 / 副词条）。也可以点"导入 freesr-data.json"一次性导入角色面板、遗器与光锥。
 2. **设置敌方与战斗参数**：敌方数量（1~5）、韧性、生命、弱点属性、等级、非弱点抗性；初始 SP、战斗总行动值上限、默认行动策略。
 3. **（可选）配置敌方攻击**：在敌方攻击表中按总行动值安排攻击来源、攻击力、目标角色与回能。
 4. **进入"▶ 交互模拟"**：按空格 / 回车推进时间；轮到角色时用普攻 / 战技，或用数字键 1~4 随时插入终结技。
 5. **查看结果**：切到行动日志 / AV 时间轴 / 伤害占比 / 伤害明细 / 汇总页查看伤害与节奏；需要回退时在交互日志中选中某一行执行回溯。
 
-队伍配置会在关闭窗口时自动保存到 `./cache/team_config.json`（相对启动目录），下次启动自动恢复。
+队伍配置会自动保存：桌面端在关闭窗口时写入 `./cache/team_config.json`，Web 端每次改动写入 `./cache/web_state.json`（两者互不影响）。
 
 ## 快捷键
 
@@ -121,13 +144,14 @@ python ui_main.py
 
 ```
 hsr-timeline-tool/
-├── ui_main.py                       # 启动入口：调用 src/ui/battle_simulator.py 的 main()
+├── ui_main.py                       # 桌面端入口：调用 src/ui/battle_simulator.py 的 main()
+├── web_main.py                      # Web 端入口：内置 HTTP 服务 + 打开浏览器
 ├── verify_api.py                    # 手动验证脚本：实测 nanoka 数据通路与图标 URL
 ├── freesr-data.json                 # 示例 freesr 配置（也是 tests/test_freesr.py 的输入）
 ├── pyproject.toml                   # 依赖、pytest、ruff 配置
 ├── docs/
-│   ├── 开发文档.md                  # 设计文档（数据源、核心设计、机制详解）
-│   └── 技术规范.md                  # 接口约定、错误 / 日志 / 测试 / UI 规范
+│   ├── 开发文档.md                  # 设计文档（数据源、核心设计、机制详解、Web 端架构）
+│   └── 技术规范.md                  # 接口约定、错误 / 日志 / 测试 / UI / Web 规范
 ├── src/
 │   ├── api/                         # 数据层（nanoka）
 │   │   ├── consts.py                # 基址、枚举映射、图标 URL 构造、缓存 TTL
@@ -148,14 +172,20 @@ hsr-timeline-tool/
 │   │   ├── characters/              # 角色技能模块（不死途 / 缇宝 / 千冶•刃 / 风堇）
 │   │   ├── lightcones/              # 光锥叠影模块（23056 / 23059 / 23038 / 23042）
 │   │   └── relics/                  # 遗器套装模块 + labels.py（部位/词条中文文案）
-│   └── ui/                          # PySide6 界面
-│       ├── battle_simulator.py      # 主窗口 BattleSimulatorWindow + main()
-│       ├── theme.py                 # 深色 QSS（DARK_STYLE）与颜色 / 命途 / 属性常量
-│       └── widgets/                 # character_picker / lightcone_picker / relic_picker
-│                                    # relic_config / timeline_gantt / damage_pie
-│                                    # sp_indicator / energy_orb / enemy_target
+│   ├── ui/                          # 桌面端 PySide6 界面
+│   │   ├── battle_simulator.py      # 主窗口 BattleSimulatorWindow + main()
+│   │   ├── theme.py                 # 深色 QSS（DARK_STYLE）与颜色 / 命途 / 属性常量
+│   │   └── widgets/                 # character_picker / lightcone_picker / relic_picker
+│   │                                # relic_config / timeline_gantt / damage_pie
+│   │                                # sp_indicator / energy_orb / enemy_target
+│   └── web/                         # Web 端（标准库后端 + 静态前端）
+│       ├── server.py                # HTTP 服务与路由（GET 静态 / GET+POST API）
+│       ├── session.py               # 会话状态：队伍行、配置、面板计算、模拟控制
+│       ├── views.py                 # 状态 → JSON 视图（表格 / 甘特 / 饼图 / 汇总数据）
+│       └── static/                  # index.html + css/app.css + js/（原生 ES Module）
+│           └── js/                  # api / ui / pickers / views / app
 ├── tests/                           # pytest（fixtures/ 为 nanoka 原始 JSON 样本）
-└── cache/                           # diskcache、图标、队伍配置（运行时生成，已 gitignore）
+└── cache/                           # diskcache、图标、两端配置（运行时生成，已 gitignore）
 ```
 
 ## 数据源与缓存
@@ -163,8 +193,9 @@ hsr-timeline-tool/
 - **基址**：`https://static.nanoka.cc`；星铁数据根 `https://static.nanoka.cc/hsr`；资源根 `https://static.nanoka.cc/assets/hsr`。
 - **版本**：由 `manifest.json` 的 `hsr.latest` 决定列表 / 详情路径。
 - **路径**：列表 `hsr/{version}/{entity}.json`（`character` / `lightcone` / `relicset` / `monster`）；详情 `hsr/{version}/zh/{entity}/{id}.json`。
-- **缓存**：`diskcache` 位于 `./cache`，TTL 为 manifest 1 小时 / 列表 10 分钟 / 详情 1 小时；请求失败时回退过期缓存。角色 / 光锥 / 遗器套装的图标缓存在 `./cache/icons`。
-- 所有网络请求都经过 [`src/api/client.py`](src/api/client.py)，UI 线程通过 `run_in_loop()` 提交到共享 asyncio 事件循环。
+- **缓存**：`diskcache` 位于 `./cache`，TTL 为 manifest 1 小时 / 列表 10 分钟 / 详情 1 小时；请求失败时回退过期缓存。桌面端的图标缓存在 `./cache/icons`，Web 端直接引用 nanoka 资源 URL。
+- 所有网络请求都经过 [`src/api/client.py`](src/api/client.py)，UI 线程通过 `run_in_loop()` 提交到共享 asyncio 事件循环（Web 端的 HTTP 工作线程同样走这个入口）。
+- 两端配置各存一份：桌面端 `./cache/team_config.json`（version 6）、Web 端 `./cache/web_state.json`。
 
 可用 `python verify_api.py` 手动实测整条数据通路（manifest → 列表 → 详情 → 提纯 → 图标 URL 可访问性 → 缓存命中）。
 
@@ -195,8 +226,8 @@ python -m pytest tests/test_av_system.py                # 单个文件
 python -m pytest tests/test_av_system.py -k next_actor  # 单个用例
 ```
 
-- 当前共 **410 个用例**（21 个测试文件），覆盖 AV 系统、属性、Buff、技能解析、伤害、模拟器、星魂、freesr、角色 / 光锥 / 遗器模块与多敌人场景。
-- 测试使用 [`tests/fixtures/`](tests/fixtures/) 中的 nanoka 原始 JSON 样本，**不打真实网络**。
+- 当前共 **440 个用例**（22 个测试文件），覆盖 AV 系统、属性、Buff、技能解析、伤害、模拟器、星魂、freesr、角色 / 光锥 / 遗器模块、多敌人场景与 Web 后端（会话 / 视图 / HTTP 路由）。
+- 测试使用 [`tests/fixtures/`](tests/fixtures/) 中的 nanoka 原始 JSON 样本，**不打真实网络**（Web 目录接口只测不依赖网络的用例）。
 - ⚠️ [`tests/test_freesr.py`](tests/test_freesr.py) 直接读取仓库根目录的 `freesr-data.json`，并断言其中不死途（1504）的星魂 / 能量 / 遗器数值。若替换了该文件（换了角色或配装），其中 4 个用例会因数据不匹配而失败，需要同步更新期望值。
 
 ## 已知限制与 TODO
@@ -210,14 +241,15 @@ python -m pytest tests/test_av_system.py -k next_actor  # 单个用例
 - 欢愉技倍率字段尚未勘探（`elation_skill_level` 目前只存储不生效）；忆灵只实现了风堇的轻量模型，遗器 319 的忆灵部分未建模。
 - 汇总页的"结束原因"显示英文枚举值（`max_av` / `all_enemies_dead` 等），未中文化。
 - 控制类负面状态、嘲讽、秘技减伤等机制尚未建模；`ruff` 与 PyInstaller 打包流程尚未在仓库中固化。
+- **Web 端**：无鉴权、无多用户，只适合本机使用；用 `--host 0.0.0.0` 暴露到局域网前请自行确认风险。截图 / 导出与亮色主题同样未实现（两端一致）。
 
 ## 文档
 
 | 文档 | 内容 |
 |---|---|
 | [`CLAUDE.md`](CLAUDE.md) | 面向 AI 助手的项目速览：常用命令、架构、数据源、机制要点 |
-| [`docs/开发文档.md`](docs/开发文档.md) | 数据源实测、项目结构、核心设计（AV / SP / Buff / 伤害公式 / 击破 / 欢愉）、freesr 导入、角色模块详解 |
-| [`docs/技术规范.md`](docs/技术规范.md) | 模块接口规范、数据模型、错误处理、日志、测试、UI、配置与设置 |
+| [`docs/开发文档.md`](docs/开发文档.md) | 数据源实测、项目结构、核心设计（AV / SP / Buff / 伤害公式 / 击破 / 欢愉）、freesr 导入、角色模块详解、Web 端架构 |
+| [`docs/技术规范.md`](docs/技术规范.md) | 模块接口规范、数据模型、错误处理、日志、测试、UI / Web 规范、配置与设置 |
 
 ## 免责声明
 

@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>星穹铁道排轴工具 · Web</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+  <div class="app">
+    <!-- 侧栏：队伍概览 / SP / 敌人 / 行动预览 -->
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="brand-main">星穹铁道排轴工具</div>
+        <div class="brand-sub">Web · AV 排轴与伤害计算</div>
+      </div>
+      <button class="btn primary block" id="btn-run">▶ 运行模拟（到最大行动值）</button>
+      <div class="sidebar-block">
+        <div class="block-title">队伍</div>
+        <div id="orb-list" class="orb-list"></div>
+      </div>
+      <div class="sidebar-block">
+        <div class="block-title">战技点</div>
+        <div id="sp-indicator" class="sp-indicator"></div>
+      </div>
+      <div class="sidebar-block">
+        <div class="block-title">敌方目标</div>
+        <div id="enemy-list" class="enemy-list"></div>
+      </div>
+      <div class="sidebar-block grow">
+        <div class="block-title">未来 300 AV 行动预览</div>
+        <div id="preview-list" class="preview-list"></div>
+      </div>
+    </aside>
+
+    <!-- 主区域 -->
+    <main class="main">
+      <header class="topbar">
+        <nav class="tabs" id="tabs"></nav>
+        <div class="topbar-actions">
+          <span id="global-status" class="status-chip"></span>
+        </div>
+      </header>
+      <section class="panels" id="panels">
+        <div class="panel" data-tab="config"></div>
+        <div class="panel" data-tab="interactive"></div>
+        <div class="panel" data-tab="logs"></div>
+        <div class="panel" data-tab="timeline"></div>
+        <div class="panel" data-tab="pie"></div>
+        <div class="panel" data-tab="details"></div>
+        <div class="panel" data-tab="summary"></div>
+      </section>
+    </main>
+  </div>
+
+  <div id="modal-root"></div>
+  <div id="toast-root" class="toast-root"></div>
+  <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

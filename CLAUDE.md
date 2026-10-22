@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-崩坏：星穹铁道 排轴与伤害计算工具（桌面应用，PySide6 + Python ≥3.10）。数据源为 nanoka（`static.nanoka.cc`），核心是 AV 行动值系统与战斗模拟引擎。所有 UI 文本、代码注释、文档均为中文，新代码应保持一致。
+崩坏：星穹铁道 排轴与伤害计算工具（Python ≥3.10）。**两套前端共享同一个计算内核**：桌面端 PySide6（`ui_main.py`）+ Web 端（`web_main.py`，Python 标准库 HTTP + 原生 ES Module，无 Node）。数据源为 nanoka（`static.nanoka.cc`），核心是 AV 行动值系统与战斗模拟引擎。所有 UI 文本、代码注释、文档均为中文，新代码应保持一致。
 
 ## 常用命令
 
@@ -12,7 +12,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # 运行 GUI 桌面端（入口，10 行，实际逻辑在 src/ui/battle_simulator.py 的 main()）
 python ui_main.py
 
-# 运行测试（当前 410 个用例：406 通过 + test_freesr.py 中 4 个受数据文件影响）
+# 运行 Web 端（默认 http://127.0.0.1:8765 ，--open 自动开浏览器，--port/--host 可改）
+python web_main.py [--open] [--port 8765] [--host 127.0.0.1]
+
+# 运行测试（当前 440 个用例：435 通过 + test_freesr.py 中 4 个受数据文件影响 + 1 个受限环境跳过）
 python -m pytest                                         # 全部
 python -m pytest tests/test_av_system.py                 # 单个文件
 python -m pytest tests/test_av_system.py -k "next_actor" # 单测
@@ -33,7 +36,7 @@ python verify_api.py
 
 ## 架构
 
-分层结构，依赖方向：`ui → core`、`ui → api`，`core` 与 `api` 互不依赖。
+分层结构，依赖方向：`ui → core`、`ui → api`、`web → core`、`web → api`，`core` 与 `api` 互不依赖；两套前端互不依赖。
 
 - **`src/api/`** — 数据层，全部指向 nanoka：
   - `consts.py` — 基址常量（`NANOKA_BASE`/`DATA_BASE`/`ASSET_BASE`/`MANIFEST_URL`）、枚举映射（`RARITY_MAP`/`PATH_MAP`/`ELEMENT_MAP`）、图标 URL 构造（纯函数）、`CacheTTL`。
@@ -49,7 +52,7 @@ python verify_api.py
   - `skill.py` — `SkillType` 八种（`NORMAL`/`SKILL`/`ULTRA`/`TALENT`/`TECHNIQUE`/`MEMO_DNSKILL`/`FOLLOW_UP`/`ADDED`）、`parse_all_skills()`、`get_skill_by_type()`；`bp_need=-1` 语义见下文。
   - `sp.py` — 战技点（`MAX=5`、`INITIAL=3`、`consume`/`recover`/`can_consume`）。
   - `eidolon.py` — 星魂参数读取（`parse_eidolons`/`get_rank_param`/`has_rank`/`rank_skill_level_bonuses`）。
-  - `character_factory.py` — `build_character_unit(...)` 把 nanoka 详情 + freesr 数据装配成 `CharacterUnit`；`convert_stats80()`、`extract_trace_bonuses()`；`make_preset_character()`（真实数据未就绪时的回退，桌面端预设角色用）。
+  - `character_factory.py` — `build_character_unit(...)` 把 nanoka 详情 + freesr 数据装配成 `CharacterUnit`；`convert_stats80()`、`extract_trace_bonuses()`；`make_preset_character()`（真实数据未就绪时的回退，两套前端共用）。
   - `freesr.py` — `parse_freesr()`、`parse_relic()`、`calc_sub_affix()`、`calc_relic_bonus()`、`compute_panel()` / `compute_panel_breakdown()`、`apply_lightcone_panel_bonus()`（光锥第一句常驻加成）、`apply_relic_set_panel_bonus()`（遗器 2 件套无条件属性）。
   - `characters/`、`lightcones/`、`relics/` — 三类**效果模块**（见下节）。
 
@@ -60,6 +63,13 @@ python verify_api.py
   - **面板计算只有一个入口** `BattleSimulatorWindow._apply_row_panel(row)`：角色详情加载完成、选光锥、配遗器、freesr 导入都调它（内部 `compute_panel_breakdown()` → `apply_lightcone_panel_bonus()` → `apply_relic_set_panel_bonus()`），改动面板逻辑不要另写分支。
 
 - **`tests/`** — pytest（扁平结构 `tests/test_*.py`）；`conftest.py` 提供 `tests/fixtures/*.json`（角色 / 光锥 / 遗器列表与详情、怪物列表）作为 fixtures。
+
+- **`src/web/`** — Web 端（**不依赖 PySide6**，只用 Python 标准库）：
+  - `server.py` — `ThreadingHTTPServer` + 路由：`GET /`、`GET /static/*`、`GET /api/meta|state|catalog/*`、`POST /api/team/*|config|import/freesr|reset|sim/*`。所有 POST 返回 `{message, state}`（完整状态）。
+  - `session.py` — 唯一会话（单用户）：4 行队伍 `Row` + 配置（enemy/battle/skill_levels/enemy_attacks）+ 交互模拟 + 快照栈；面板计算 `apply_panel()`、战斗构造 `build_characters()/build_enemies()`、模拟控制 `run()/start_sim()/advance()/act()/ultra()/rewind()`。状态存 `./cache/web_state.json`。
+  - `views.py` — 状态 → JSON 视图（面板格式化、交互模拟状态、甘特 lanes、饼图、汇总卡片等），前端只渲染。
+  - `static/` — 无构建前端：`index.html` + `css/app.css` + `js/{api,ui,pickers,views,app}.js`（原生 ES Module；甘特 Canvas、饼图 SVG 手绘）。
+  - 数值口径必须与桌面端一致：面板走 `compute_panel_breakdown → apply_lightcone_panel_bonus → apply_relic_set_panel_bonus`，战斗构造镜像桌面端 `_collect_config()`（白字/绿字拆分 + `_sync_flat` 反解）。改动其中一侧时另一侧要同步。
 
 - **`verify_api.py`** — 手动验证脚本：拉取 manifest → 列表/详情 → 提纯 → 图标 URL 可访问性 → 缓存命中。
 
